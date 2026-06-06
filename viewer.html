@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kenya 3D Cadastre Viewer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0f1117; font-family: 'Segoe UI', system-ui, sans-serif;
+         color: #e2e8f0; overflow: hidden; }
+
+  #canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+
+  /* ── Top bar ── */
+  #topbar {
+    position: fixed; top: 0; left: 0; right: 0; height: 48px;
+    background: rgba(15,17,23,0.92); backdrop-filter: blur(8px);
+    border-bottom: 1px solid #2d3748;
+    display: flex; align-items: center; gap: 12px; padding: 0 16px;
+    z-index: 10;
+  }
+  #topbar .logo { font-size: 13px; font-weight: 700; color: #63b3ed;
+                  letter-spacing: .05em; white-space: nowrap; }
+  #topbar .sep  { color: #4a5568; }
+  #topbar .hint { font-size: 12px; color: #718096; }
+  #stats { margin-left: auto; font-size: 12px; color: #a0aec0; }
+
+  /* ── Drop overlay ── */
+  #drop {
+    position: fixed; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; z-index: 20;
+    background: rgba(15,17,23,0.97);
+  }
+  #drop h1 { font-size: 22px; font-weight: 700; color: #63b3ed; margin-bottom: 8px; }
+  #drop p  { font-size: 14px; color: #a0aec0; margin-bottom: 28px; text-align:center;
+             max-width: 340px; line-height: 1.6; }
+  #dropzone {
+    width: 320px; height: 180px; border: 2px dashed #4a5568; border-radius: 12px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; cursor: pointer; transition: border-color .2s, background .2s;
+  }
+  #dropzone:hover, #dropzone.over { border-color: #63b3ed; background: rgba(99,179,237,.05); }
+  #dropzone .icon { font-size: 36px; }
+  #dropzone span  { font-size: 13px; color: #a0aec0; }
+  #fileInput { display: none; }
+  #drop small { margin-top: 16px; font-size: 11px; color: #4a5568; }
+
+  /* ── Info panel ── */
+  #panel {
+    position: fixed; top: 56px; right: 16px; width: 280px;
+    background: rgba(15,17,23,0.95); backdrop-filter: blur(8px);
+    border: 1px solid #2d3748; border-radius: 10px;
+    padding: 16px; z-index: 10;
+    transform: translateX(320px); transition: transform .25s ease;
+  }
+  #panel.open { transform: translateX(0); }
+  #panel-close {
+    position: absolute; top: 10px; right: 12px; background: none; border: none;
+    color: #718096; font-size: 18px; cursor: pointer; line-height: 1;
+  }
+  #panel-close:hover { color: #e2e8f0; }
+  #panel h2 { font-size: 14px; font-weight: 700; color: #63b3ed;
+              margin-bottom: 14px; padding-right: 20px; word-break: break-all; }
+  .row { display: flex; justify-content: space-between; align-items: baseline;
+         padding: 5px 0; border-bottom: 1px solid #1a202c; }
+  .row:last-child { border-bottom: none; }
+  .row .label { font-size: 11px; color: #718096; text-transform: uppercase;
+                letter-spacing: .06em; }
+  .row .value { font-size: 13px; color: #e2e8f0; font-weight: 500;
+                text-align: right; max-width: 160px; word-break: break-all; }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 600; margin-top: 4px;
+  }
+  .badge.res  { background: #2c5282; color: #90cdf4; }
+  .badge.com  { background: #744210; color: #fbd38d; }
+  .badge.ind  { background: #22543d; color: #9ae6b4; }
+  #osm-link { font-size: 11px; color: #63b3ed; text-decoration: none;
+              display: block; margin-top: 10px; text-align: center; }
+  #osm-link:hover { text-decoration: underline; }
+
+  /* ── Controls ── */
+  #controls {
+    position: fixed; bottom: 16px; right: 16px; z-index: 10;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .ctrl-btn {
+    background: rgba(15,17,23,0.92); border: 1px solid #2d3748;
+    color: #a0aec0; border-radius: 6px; padding: 6px 12px; font-size: 12px;
+    cursor: pointer; transition: all .15s;
+  }
+  .ctrl-btn:hover { background: #1a202c; color: #e2e8f0; }
+
+  /* ── Tooltip ── */
+  #tooltip {
+    position: fixed; pointer-events: none; background: rgba(15,17,23,0.9);
+    border: 1px solid #2d3748; border-radius: 6px; padding: 5px 10px;
+    font-size: 12px; color: #e2e8f0; z-index: 15; display: none;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+<div id="tooltip"></div>
+
+<!-- Drop screen -->
+<div id="drop">
+  <h1>🏙️ Kenya 3D Cadastre</h1>
+  <p>Load a .glb file exported from exportToGLTF.py.<br>
+     Click any building to view its cadastral details.</p>
+  <div id="dropzone" onclick="document.getElementById('fileInput').click()">
+    <span class="icon">📂</span>
+    <span>Drop .glb here or click to browse</span>
+  </div>
+  <input type="file" id="fileInput" accept=".glb">
+  <small>Works with any .glb from 3D Cadastre Kenya</small>
+</div>
+
+<!-- Top bar -->
+<div id="topbar" style="display:none">
+  <span class="logo">🏙️ Kenya 3D Cadastre</span>
+  <span class="sep">|</span>
+  <span class="hint">Click a building for details &nbsp;•&nbsp; Scroll to zoom &nbsp;•&nbsp; Drag to rotate</span>
+  <span id="stats"></span>
+</div>
+
+<!-- Info panel -->
+<div id="panel">
+  <button id="panel-close" onclick="closePanel()">×</button>
+  <h2 id="p-name">Building</h2>
+  <div id="p-rows"></div>
+  <a id="osm-link" target="_blank" style="display:none">View on OpenStreetMap ↗</a>
+</div>
+
+<!-- Controls -->
+<div id="controls" style="display:none">
+  <button class="ctrl-btn" onclick="resetCamera()">⟳ Reset view</button>
+  <button class="ctrl-btn" onclick="toggleWireframe()">⬜ Wireframe</button>
+</div>
+
+<script src="https://cdn.babylonjs.com/babylon.js"></script>
+<script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+<script>
+let engine, scene, camera, highlighted = null, wireMode = false;
+const tooltip = document.getElementById('tooltip');
+
+// ── Bootstrap ───────────────────────────────────────────────────────────────
+
+window.addEventListener('load', () => {
+  // Check query param ?model=...
+  const params = new URLSearchParams(location.search);
+  if (params.get('model')) loadURL(params.get('model'));
+
+  // Drag-and-drop setup
+  const dz = document.getElementById('dropzone');
+  dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('over'); });
+  dz.addEventListener('dragleave', () => dz.classList.remove('over'));
+  dz.addEventListener('drop', e => {
+    e.preventDefault(); dz.classList.remove('over');
+    const f = e.dataTransfer.files[0];
+    if (f && f.name.endsWith('.glb')) loadFile(f);
+  });
+  document.getElementById('fileInput').addEventListener('change', e => {
+    if (e.target.files[0]) loadFile(e.target.files[0]);
+  });
+});
+
+// ── File loading ─────────────────────────────────────────────────────────────
+
+function loadFile(file) {
+  const url = URL.createObjectURL(file);
+  initEngine();
+  BABYLON.SceneLoader.ImportMeshAsync('', '', url, scene, null, '.glb')
+    .then(r => onLoaded(r, file.name));
+}
+
+function loadURL(url) {
+  initEngine();
+  const dir = url.includes('/') ? url.substring(0, url.lastIndexOf('/')+1) : '';
+  const file = url.includes('/') ? url.substring(url.lastIndexOf('/')+1) : url;
+  BABYLON.SceneLoader.ImportMeshAsync('', dir, file, scene)
+    .then(r => onLoaded(r, file));
+}
+
+function initEngine() {
+  if (engine) return;
+  const canvas = document.getElementById('canvas');
+  engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true });
+  scene  = new BABYLON.Scene(engine);
+  scene.clearColor = new BABYLON.Color4(0.06, 0.07, 0.09, 1);
+
+  // Camera
+  camera = new BABYLON.ArcRotateCamera('cam', -Math.PI/4, Math.PI/3.5, 200, BABYLON.Vector3.Zero(), scene);
+  camera.lowerRadiusLimit = 10;
+  camera.upperBetaLimit   = Math.PI / 2.05;
+  camera.wheelPrecision   = 3;
+  camera.attachControl(canvas, true);
+
+  // Lighting
+  const hemi = new BABYLON.HemisphericLight('h', new BABYLON.Vector3(0,1,0), scene);
+  hemi.intensity = 0.7; hemi.groundColor = new BABYLON.Color3(0.3,0.3,0.3);
+  const sun  = new BABYLON.DirectionalLight('sun', new BABYLON.Vector3(-1,-1.5,-0.5), scene);
+  sun.intensity = 0.9;
+
+  engine.runRenderLoop(() => scene && scene.render());
+  window.addEventListener('resize', () => engine.resize());
+
+  setupInteraction();
+}
+
+function onLoaded(result, filename) {
+  document.getElementById('drop').style.display = 'none';
+  document.getElementById('topbar').style.display = 'flex';
+  document.getElementById('controls').style.display = 'flex';
+
+  // Count buildings
+  const bldgs = result.meshes.filter(m => m.name.startsWith('building_'));
+  document.getElementById('stats').textContent =
+    `${bldgs.length} buildings · ${filename}`;
+
+  // Frame camera on scene
+  const bounds = scene.getWorldExtends();
+  const centre = bounds.min.add(bounds.max).scale(0.5);
+  const size   = bounds.max.subtract(bounds.min).length();
+  camera.target = centre;
+  camera.radius = size * 0.8;
+}
+
+// ── Interaction ───────────────────────────────────────────────────────────────
+
+function setupInteraction() {
+  const canvas = document.getElementById('canvas');
+
+  // Hover
+  scene.onPointerMoveObservable.add(evt => {
+    const pick = scene.pick(scene.pointerX, scene.pointerY, m => m.name.startsWith('building_'));
+    if (pick.hit && pick.pickedMesh) {
+      const ex = pick.pickedMesh.metadata?.gltf?.extras;
+      const label = ex?.name || ex?.osmID ? `OSM #${ex.osmID}` : pick.pickedMesh.name;
+      tooltip.style.display = 'block';
+      tooltip.style.left = (evt.clientX + 14) + 'px';
+      tooltip.style.top  = (evt.clientY - 6)  + 'px';
+      tooltip.textContent = label;
+    } else {
+      tooltip.style.display = 'none';
+    }
+  });
+
+  // Click
+  scene.onPointerDownObservable.add(info => {
+    if (info.event.button !== 0) return;
+    const pick = scene.pick(scene.pointerX, scene.pointerY, m => m.name.startsWith('building_'));
+    if (pick.hit && pick.pickedMesh) {
+      selectBuilding(pick.pickedMesh);
+    } else {
+      closePanel();
+    }
+  });
+}
+
+function selectBuilding(mesh) {
+  // Restore previous highlight
+  if (highlighted && highlighted !== mesh) {
+    highlighted.renderOverlay = false;
+  }
+  highlighted = mesh;
+  mesh.renderOverlay  = true;
+  mesh.overlayColor   = new BABYLON.Color3(0.4, 0.7, 1.0);
+  mesh.overlayAlpha   = 0.3;
+
+  const ex = mesh.metadata?.gltf?.extras || {};
+  showPanel(mesh.name, ex);
+}
+
+function closePanel() {
+  document.getElementById('panel').classList.remove('open');
+  if (highlighted) { highlighted.renderOverlay = false; highlighted = null; }
+}
+
+function showPanel(meshName, ex) {
+  document.getElementById('p-name').textContent =
+    ex.name || (ex.osmID ? `Building #${ex.osmID}` : meshName.replace('building_','Bldg '));
+
+  const usageClass = ex.usage?.toLowerCase().includes('res') ? 'res'
+                   : ex.usage?.toLowerCase().includes('ind') ? 'ind' : 'com';
+
+  const rows = [
+    ['Usage',           ex.usage ? `<span class="badge ${usageClass}">${ex.usage}</span>` : '—'],
+    ['Floors',          ex.floors ?? '—'],
+    ['Height',          ex.heightM != null ? ex.heightM + ' m' : '—'],
+    ['Footprint',       ex.footprintAreaM2 != null ? ex.footprintAreaM2 + ' m²' : '—'],
+    ['Gross Floor Area',ex.grossFloorAreaM2 != null ? ex.grossFloorAreaM2 + ' m²' : '—'],
+    ['Roof type',       ex.roofType ?? '—'],
+    ['Year built',      ex.yearBuilt ?? '—'],
+    ['Valuation class', ex.valuation ?? '—'],
+  ];
+
+  document.getElementById('p-rows').innerHTML = rows.map(([l,v]) =>
+    `<div class="row"><span class="label">${l}</span><span class="value">${v}</span></div>`
+  ).join('');
+
+  const osmLink = document.getElementById('osm-link');
+  if (ex.osmID) {
+    osmLink.href = `https://www.openstreetmap.org/way/${ex.osmID}`;
+    osmLink.style.display = 'block';
+  } else {
+    osmLink.style.display = 'none';
+  }
+
+  document.getElementById('panel').classList.add('open');
+}
+
+// ── Controls ──────────────────────────────────────────────────────────────────
+
+function resetCamera() {
+  if (!scene) return;
+  const bounds = scene.getWorldExtends();
+  camera.target = bounds.min.add(bounds.max).scale(0.5);
+  camera.radius = bounds.max.subtract(bounds.min).length() * 0.8;
+}
+
+function toggleWireframe() {
+  if (!scene) return;
+  wireMode = !wireMode;
+  scene.meshes.forEach(m => { if (m.material) m.material.wireframe = wireMode; });
+}
+</script>
+</body>
+</html>

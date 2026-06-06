@@ -459,20 +459,59 @@ def main():
         for b in buildings:
             export_building(b, builder, lod, offset)
 
+        # ── Roads from OSM (centerline → buffered quads) ──────────────────────
+        roads_el = root.find("roads")
+        if roads_el is not None:
+            builder.group("osm_roads")
+            for rd in roads_el.findall("road"):
+                nodes_txt = rd.findtext("nodes")
+                if not nodes_txt:
+                    continue
+                hw = float(rd.attrib.get("width", 5.0))
+                vals = [float(v) for v in nodes_txt.split()]
+                pts = [(vals[i] - offset[0], vals[i+1] - offset[1])
+                       for i in range(0, len(vals)-1, 2)]
+                hh = hw / 2.0
+                for i in range(len(pts) - 1):
+                    p1, p2 = pts[i], pts[i+1]
+                    dx, dy = p2[0]-p1[0], p2[1]-p1[1]
+                    seg_len = math.sqrt(dx*dx + dy*dy)
+                    if seg_len < 0.1:
+                        continue
+                    nx, ny = -dy/seg_len * hh, dx/seg_len * hh
+                    quad = [(p1[0]-nx, p1[1]-ny, 0.01),
+                            (p1[0]+nx, p1[1]+ny, 0.01),
+                            (p2[0]+nx, p2[1]+ny, 0.01),
+                            (p2[0]-nx, p2[1]-ny, 0.01)]
+                    builder.poly(quad, flat_uv(hw, seg_len), "Road")
+
+        # ── Parks from OSM (real polygon) ─────────────────────────────────────
         parks_el = root.find("parks")
         if parks_el is not None:
             builder.group("parks")
             for park in parks_el.findall("park"):
-                txt = park.findtext("outline")
-                if txt:
-                    x0, y0, x1, y1 = [float(v) - offset[0] for v in txt.split()[:2]] + \
-                                      [float(v) - offset[1] for v in txt.split()[2:]]
-                    # parks have 4 values: ox0, oy0, ox1, oy1
-                    coords = [float(v) for v in txt.split()]
-                    px0 = coords[0] - offset[0]; py0 = coords[1] - offset[1]
-                    px1 = coords[2] - offset[0]; py1 = coords[3] - offset[1]
-                    builder.poly([(px0,py0,0.02),(px1,py0,0.02),(px1,py1,0.02),(px0,py1,0.02)],
-                                 flat_uv(abs(px1-px0), abs(py1-py0)), "Park")
+                # New format: <polygon> from osmToXML.py
+                poly_txt = park.findtext("polygon")
+                if poly_txt:
+                    vals = [float(v) for v in poly_txt.split()]
+                    pts = [(vals[i]-offset[0], vals[i+1]-offset[1], 0.02)
+                           for i in range(0, len(vals)-1, 2)]
+                    if len(pts) >= 3:
+                        # Planar UV per vertex
+                        min_x = min(p[0] for p in pts)
+                        min_y = min(p[1] for p in pts)
+                        uvs = [((p[0]-min_x)/UV_TILE, (p[1]-min_y)/UV_TILE) for p in pts]
+                        builder.poly(pts, uvs, "Park")
+                else:
+                    # Legacy format: <outline> from randomiseCity.py
+                    txt = park.findtext("outline")
+                    if txt:
+                        coords = [float(v) for v in txt.split()]
+                        px0 = coords[0]-offset[0]; py0 = coords[1]-offset[1]
+                        px1 = coords[2]-offset[0]; py1 = coords[3]-offset[1]
+                        builder.poly([(px0,py0,0.02),(px1,py0,0.02),
+                                      (px1,py1,0.02),(px0,py1,0.02)],
+                                     flat_uv(abs(px1-px0), abs(py1-py0)), "Park")
 
         builder.write(out_path, mtl_name)
         print(f"Written {out_path}  ({len(builder.verts):,} vertices, {len(builder.faces):,} faces)")

@@ -100,48 +100,71 @@ def latlon_to_utm37s(lat, lon):
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
-def fetch_buildings(lat, lon, radius):
-    """Fetch OSM building ways within radius metres of (lat, lon)."""
+ROAD_WIDTHS = {
+    "motorway": 14.0, "trunk": 12.0, "primary": 10.0, "secondary": 8.0,
+    "tertiary": 6.0,  "residential": 5.0, "service": 3.5,
+    "unclassified": 5.0, "footway": 2.0, "path": 1.5, "cycleway": 2.0,
+    "living_street": 4.0, "pedestrian": 4.0,
+}
+
+def fetch_city_data(lat, lon, radius):
+    """Fetch buildings, roads, and green areas from OSM in one query."""
     query = f"""
-[out:json][timeout:60];
+[out:json][timeout:90];
 (
   way["building"](around:{radius},{lat},{lon});
   relation["building"](around:{radius},{lat},{lon});
+  way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|service|unclassified|footway|path|cycleway|living_street|pedestrian)$"](around:{radius},{lat},{lon});
+  way["leisure"~"^(park|garden|recreation_ground|pitch|playground)$"](around:{radius},{lat},{lon});
+  way["landuse"~"^(park|grass|forest|recreation_ground|village_green|meadow)$"](around:{radius},{lat},{lon});
+  way["natural"~"^(wood|grassland|scrub)$"](around:{radius},{lat},{lon});
 );
 out body;
 >;
 out skel qt;
 """
-    print(f"Fetching OSM buildings within {radius} m of ({lat:.4f}, {lon:.4f}) ...")
+    print(f"Fetching buildings, roads and green areas within {radius} m of ({lat:.4f}, {lon:.4f}) ...")
     headers = {"User-Agent": "3D-Cadastre-Kenya/1.0 (github.com/kitavidavis/3d-buildings-generator)"}
-    resp = requests.post(OVERPASS_URL, data={"data": query}, headers=headers, timeout=90)
+    resp = requests.post(OVERPASS_URL, data={"data": query}, headers=headers, timeout=120)
     resp.raise_for_status()
     return resp.json()
 
 def parse_osm(data):
     """
-    Parse Overpass JSON into a list of buildings.
-    Each building: {id, nodes: [(lat,lon),...], tags: {}}
+    Parse Overpass JSON into buildings, roads, and parks.
+    Returns: (buildings, roads, parks)
+      buildings: [{id, nodes:[(lat,lon)], tags}]
+      roads:     [{id, nodes:[(lat,lon)], tags, width}]
+      parks:     [{id, nodes:[(lat,lon)], tags}]
     """
     nodes = {}
     for el in data["elements"]:
         if el["type"] == "node":
             nodes[el["id"]] = (el["lat"], el["lon"])
 
-    buildings = []
+    buildings, roads, parks = [], [], []
     for el in data["elements"]:
         if el["type"] != "way":
             continue
-        if "building" not in el.get("tags", {}):
+        tags = el.get("tags", {})
+        coords = [nodes[nid] for nid in el.get("nodes", []) if nid in nodes]
+        if len(coords) < 2:
             continue
-        coords = []
-        for nid in el.get("nodes", []):
-            if nid in nodes:
-                coords.append(nodes[nid])
-        if len(coords) < 4:   # need at least a triangle + closing node
-            continue
-        buildings.append({"id": el["id"], "nodes": coords, "tags": el.get("tags", {})})
-    return buildings
+
+        if "building" in tags and len(coords) >= 4:
+            buildings.append({"id": el["id"], "nodes": coords, "tags": tags})
+
+        elif "highway" in tags:
+            hw = tags["highway"]
+            width = float(tags.get("width", ROAD_WIDTHS.get(hw, 4.0)))
+            roads.append({"id": el["id"], "nodes": coords, "tags": tags,
+                          "type": hw, "width": width})
+
+        elif any(k in tags for k in ("leisure", "landuse", "natural")):
+            if len(coords) >= 4:
+                parks.append({"id": el["id"], "nodes": coords, "tags": tags})
+
+    return buildings, roads, parks
 
 # ── Building attribute extraction ─────────────────────────────────────────────
 
@@ -274,34 +297,56 @@ def main():
         print("Provide --city or both --lat and --lon")
         sys.exit(1)
 
-    data = fetch_buildings(centre_lat, centre_lon, ARGS.radius)
-    osm_buildings = parse_osm(data)
-    print(f"Found {len(osm_buildings)} OSM building ways.")
+    data = fetch_city_data(centre_lat, centre_lon, ARGS.radius)
+    osm_buildings, osm_roads, osm_parks = parse_osm(data)
+    print(f"Found {len(osm_buildings)} buildings, {len(osm_roads)} roads, "
+          f"{len(osm_parks)} green areas.")
 
     if not osm_buildings:
-        print("No buildings found. Try increasing --radius or choosing a different location.")
+        print("No buildings found. Try increasing --radius or a different location.")
         sys.exit(0)
 
     root = etree.Element("specifications")
     count = 0
 
+    # ── Buildings ────────────────────────────────────────────────────────────
     for bldg in osm_buildings:
         bbox = footprint_bbox_utm(bldg["nodes"])
         if bbox is None:
             continue
-
         ox, oy, xs, ys = bbox
-        tags   = bldg["tags"]
-        floors = _tag_floors(tags)
-        zs     = _tag_height(tags, floors)
+        tags    = bldg["tags"]
+        floors  = _tag_floors(tags)
+        zs      = _tag_height(tags, floors)
         floor_h = round(zs / floors, 2)
-        rtype  = _tag_roof(tags)
-        usage  = _tag_usage(tags)
-        bid    = str(uuid.uuid4())
-
+        rtype   = _tag_roof(tags)
+        usage   = _tag_usage(tags)
+        bid     = str(uuid.uuid4())
         building_to_xml(root, bldg, ox, oy, 0.0, xs, ys, zs,
                         floors, floor_h, rtype, usage, bid)
         count += 1
+
+    # ── Roads ────────────────────────────────────────────────────────────────
+    if osm_roads:
+        roads_el = etree.SubElement(root, "roads")
+        for rd in osm_roads:
+            utm_pts = [latlon_to_utm37s(lat, lon) for lat, lon in rd["nodes"]]
+            flat = " ".join(f"{e:.2f} {n:.2f}" for e, n in utm_pts)
+            road_el = etree.SubElement(roads_el, "road")
+            road_el.attrib["type"]  = rd["type"]
+            road_el.attrib["width"] = str(rd["width"])
+            etree.SubElement(road_el, "nodes").text = flat
+
+    # ── Parks / green areas ──────────────────────────────────────────────────
+    if osm_parks:
+        parks_el = etree.SubElement(root, "parks")
+        for pk in osm_parks:
+            utm_pts = [latlon_to_utm37s(lat, lon) for lat, lon in pk["nodes"][:-1]]
+            if len(utm_pts) < 3:
+                continue
+            flat = " ".join(f"{e:.2f} {n:.2f}" for e, n in utm_pts)
+            park_el = etree.SubElement(parks_el, "park")
+            etree.SubElement(park_el, "polygon").text = flat
 
     xml_bytes = etree.tostring(root, pretty_print=True)
     with open(ARGS.output, "w", encoding="utf-8") as f:
