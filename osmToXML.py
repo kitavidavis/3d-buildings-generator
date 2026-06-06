@@ -351,22 +351,66 @@ def _tag_roof(tags):
 
 
 def _tag_usage(tags):
+    """
+    Classify building usage from OSM tags.
+    Checks building=, office=, shop=, amenity=, tourism=, landuse= in priority order.
+    Returns 'Residential' | 'Commercial' | 'Industrial' | 'Civic' | 'Unknown'.
+    NEVER defaults to Residential for untagged buildings — that misleads users
+    viewing commercial areas like Nairobi CBD.
+    """
     b       = tags.get("building", "yes").lower()
     amenity = tags.get("amenity", "").lower()
+    office  = tags.get("office", "").lower()
+    shop    = tags.get("shop", "").lower()
+    tourism = tags.get("tourism", "").lower()
     landuse = tags.get("landuse", "").lower()
-    shop    = tags.get("shop", "")
+
+    # Residential
     if b in ("residential", "apartments", "house", "detached",
-             "semidetached_house", "terrace", "bungalow", "dormitory"):
+             "semidetached_house", "terrace", "bungalow", "dormitory",
+             "cabin", "hut", "static_caravan"):
         return "Residential"
-    if b in ("commercial", "retail", "office", "supermarket",
-             "hotel", "bank") or shop:
+
+    # Commercial
+    if b in ("commercial", "retail", "office", "supermarket", "hotel",
+             "bank", "shopping_centre", "kiosk", "service"):
         return "Commercial"
-    if b in ("industrial", "warehouse", "factory"):
+    if office:    # office=government/company/bank/yes → Commercial
+        return "Commercial"
+    if shop:      # shop=* always commercial
+        return "Commercial"
+    if tourism in ("hotel", "hostel", "motel", "apartment", "guest_house"):
+        return "Commercial"
+    if amenity in ("restaurant", "cafe", "fast_food", "bar", "pub", "nightclub",
+                   "bank", "pharmacy", "marketplace", "fuel", "parking",
+                   "car_rental", "bureau_de_change"):
+        return "Commercial"
+    if landuse in ("commercial", "retail"):
+        return "Commercial"
+
+    # Industrial
+    if b in ("industrial", "warehouse", "factory", "hangar", "storage_tank"):
         return "Industrial"
-    if amenity in ("school", "hospital", "clinic", "university", "college",
-                   "place_of_worship", "community_centre"):
+    if landuse in ("industrial", "port", "quarry"):
+        return "Industrial"
+
+    # Civic / Public
+    if b in ("church", "mosque", "cathedral", "temple", "synagogue",
+             "chapel", "hospital", "school", "university", "college",
+             "kindergarten", "government", "civic", "stadium",
+             "sports_hall", "train_station", "transportation"):
         return "Civic"
-    return "Residential"  # default for unknown
+    if amenity in ("school", "hospital", "clinic", "university", "college",
+                   "place_of_worship", "community_centre", "police",
+                   "fire_station", "courthouse", "embassy", "town_hall",
+                   "library", "theatre", "cinema", "prison", "social_facility",
+                   "arts_centre", "conference_centre"):
+        return "Civic"
+    if landuse in ("religious", "education", "health", "government"):
+        return "Civic"
+
+    # Unknown — never assume Residential for unclassified buildings
+    return "Unknown"
 
 # ── Footprint → bounding box ──────────────────────────────────────────────────
 

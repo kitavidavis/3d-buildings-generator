@@ -95,7 +95,8 @@ input[type=file] { display: none; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
 .badge.res { background: #2c5282; color: #90cdf4; }
 .badge.com { background: #744210; color: #fbd38d; }
-.badge.ind { background: #22543d; color: #9ae6b4; }
+.badge.ind { background: #553c9a; color: #d6bcfa; }
+.badge.civ { background: #22543d; color: #9ae6b4; }
 #osm-link { font-size: 11px; color: #63b3ed; text-decoration: none;
             display: block; margin-top: 10px; text-align: center; }
 #osm-link:hover { text-decoration: underline; }
@@ -238,24 +239,45 @@ function closePanel() {
     mlMap.setFilter('bldg-select', ['==', 'buildingID', '']);
 }
 
+// Badge class per usage
+function usageBadge(usage) {
+  if (!usage || usage === 'Unknown') return `<span style="color:#718096">Unknown</span>`;
+  const map = {
+    'Residential': 'res',
+    'Commercial':  'com',
+    'Industrial':  'ind',
+    'Civic':       'civ',
+  };
+  const cls = map[usage] || 'com';
+  return `<span class="badge ${cls}">${usage}</span>`;
+}
+
 function showPanel(title, ex) {
   document.getElementById('p-name').textContent = title;
-  const u = (ex.usage || '').toLowerCase();
-  const cls = u.includes('res') ? 'res' : u.includes('ind') ? 'ind' : 'com';
-  const val = v => (v != null && v !== '-' && v !== '') ? v : '—';
-  const rows = [
-    ['Usage',            ex.usage ? `<span class="badge ${cls}">${ex.usage}</span>` : '—'],
+
+  const val = v => (v != null && v !== '-' && v !== '' && v !== '—') ? v : '—';
+
+  const rows = [];
+
+  // Building name (if different from the panel title, e.g. title has OSM ID)
+  if (ex.name && ex.name !== title) {
+    rows.push(['Name', ex.name]);
+  }
+
+  rows.push(
+    ['Usage',            usageBadge(ex.usage)],
     ['Floors',           val(ex.floors)],
     ['Height',           ex.heightM != null ? ex.heightM + ' m' : '—'],
     ['Footprint',        ex.footprintAreaM2  != null ? ex.footprintAreaM2  + ' m²' : '—'],
     ['Gross floor area', ex.grossFloorAreaM2 != null ? ex.grossFloorAreaM2 + ' m²' : '—'],
     ['Roof type',        val(ex.roofType)],
     ['Year built',       val(ex.yearBuilt)],
-    ['Valuation class',  val(ex.valuation)],
-  ];
+  );
+
   document.getElementById('p-rows').innerHTML = rows
     .map(([l,v]) => `<div class="row"><span class="label">${l}</span><span class="value">${v}</span></div>`)
     .join('');
+
   const link = document.getElementById('osm-link');
   if (ex.osmID) {
     link.href = `https://www.openstreetmap.org/way/${ex.osmID}`;
@@ -414,10 +436,10 @@ function startMapLibre(geojson, filename) {
     mlMap.on('click', 'bldg-fill', e => {
       const p = e.features[0].properties;
       mlMap.setFilter('bldg-select', ['==', 'buildingID', p.buildingID || '']);
-      showPanel(
-        p.osmID ? `Building OSM #${p.osmID}` : `Building ${(p.buildingID||'').substring(0,8)}`,
-        p,
-      );
+      // Title priority: OSM name → OSM ID → internal UUID prefix
+      const title = p.name
+        || (p.osmID ? `OSM Building #${p.osmID}` : `Building ${(p.buildingID||'').substring(0,8)}`);
+      showPanel(title, p);
     });
     mlMap.on('click', e => {
       if (!mlMap.queryRenderedFeatures(e.point, { layers: ['bldg-fill'] }).length)
@@ -426,7 +448,8 @@ function startMapLibre(geojson, filename) {
     mlMap.on('mouseenter', 'bldg-fill', e => {
       mlMap.getCanvas().style.cursor = 'pointer';
       const p = e.features[0].properties;
-      const label = p.osmID ? `OSM #${p.osmID}` : (p.buildingID||'').substring(0,8);
+      // Tooltip: prefer building name, fall back to OSM ID
+      const label = p.name || (p.osmID ? `OSM #${p.osmID}` : (p.buildingID||'').substring(0,8));
       const ev = e.originalEvent;
       tooltip.style.display = 'block';
       tooltip.style.left    = (ev.clientX + 14) + 'px';
@@ -461,11 +484,13 @@ function toggleBldgColour() {
   if (!mlMap || !mlMap.getLayer('bldg-fill')) return;
   _colourGrey = !_colourGrey;
   const expr = _colourGrey
-    ? '#d6d3cf'
+    ? '#d6d3cf'   // uniform warm grey — TU Delft style
     : ['match', ['get', 'usage'],
-        'Residential', '#b8d4ee',
-        'industrial',  '#f5d8b0',
-        /* default */  '#d6d3cf'];
+        'Residential', '#b8d4ee',  // soft blue
+        'Commercial',  '#f5ddb8',  // soft amber
+        'Industrial',  '#d8b8f0',  // soft purple
+        'Civic',       '#b8f0d0',  // soft green
+        /* Unknown / default */ '#d6d3cf'];
   mlMap.setPaintProperty('bldg-fill', 'fill-extrusion-color', expr);
   document.getElementById('btn-colour').textContent =
     _colourGrey ? '🎨 Colour by usage' : '⬜ Uniform grey';
