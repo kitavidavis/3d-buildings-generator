@@ -60,8 +60,7 @@ jobs:
           python build_kenya_dataset.py \
             --radius 2000 \
             --source microsoft \
-            --output kenya-buildings.geojson \
-            --stats
+            --output kenya-buildings.geojson
         env:
           PYTHONUNBUFFERED: "1"   # show progress in real time
 

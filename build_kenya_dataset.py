@@ -56,8 +56,6 @@ PARSER.add_argument("--source", choices=["osm", "microsoft", "both"], default="m
     help="Data source: 'microsoft' (best shapes), 'osm' (best attributes), 'both' (merged)")
 PARSER.add_argument("--output", default="kenya-buildings.geojson",
     help="Output GeoJSON filename (default: kenya-buildings.geojson)")
-PARSER.add_argument("--stats", action="store_true",
-    help="Print dataset statistics after building")
 ARGS = PARSER.parse_args()
 
 # ── City centres ─────────────────────────────────────────────────────────────
@@ -352,8 +350,7 @@ def main():
     size_mb = out.stat().st_size / 1024 / 1024
     print(f"Written {out}  ({size_mb:.1f} MB)")
 
-    if ARGS.stats:
-        print_stats(unique)
+    print_stats(unique)
 
     print(f"""
 Next steps:
