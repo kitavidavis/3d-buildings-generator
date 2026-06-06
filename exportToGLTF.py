@@ -211,11 +211,13 @@ def _opening_pts(ox, oy, oz, xs, ys, wall, wx, wy, ww, wh):
         y0, y1 = oy+ys-wx-ww, oy+ys-wx
         return [(ox,y1,z0),(ox,y0,z0),(ox,y0,z1),(ox,y1,z1)]
 
-def export_building(b, geom, lod):
+def export_building(b, geom, lod, offset=(0.0, 0.0)):
     bid = b.attrib.get("ID", "bldg")
     wall_mat, roof_mat = building_mats(bid)
 
     ox, oy, oz = [float(v) for v in b.findtext("origin").split()]
+    ox -= offset[0]
+    oy -= offset[1]
     xs = float(b.findtext("xSize"))
     ys = float(b.findtext("ySize"))
     zs = float(b.findtext("zSize"))
@@ -347,9 +349,17 @@ def pack_gltf(geom, out_path):
     primitives   = []
     materials    = []
 
-    def _align4(data):
-        pad = (4 - len(data) % 4) % 4
-        return data + b"\x00" * pad
+    def _pad4(n):
+        """Return number of padding bytes needed to align n to 4 bytes."""
+        return (4 - n % 4) % 4
+
+    def _append(data):
+        """Append data to blob, pad to 4-byte boundary, return (offset, length)."""
+        nonlocal blob
+        off = len(blob)
+        blob += data
+        blob += b"\x00" * _pad4(len(data))   # alignment padding
+        return off, len(data)                  # byteLength = ACTUAL size, not padded
 
     for mat_name in geom.materials():
         pos_arr = np.array(geom.pos[mat_name], dtype=np.float32)
@@ -360,43 +370,34 @@ def pack_gltf(geom, out_path):
             continue
 
         # Positions
-        pos_bytes  = _align4(pos_arr.tobytes())
-        bv_pos_off = len(blob)
-        blob      += pos_bytes
+        bv_pos_off, bv_pos_len = _append(pos_arr.tobytes())
         bv_pos = BufferView(buffer=0, byteOffset=bv_pos_off,
-                            byteLength=len(pos_bytes), target=ARRAY_BUFFER)
+                            byteLength=bv_pos_len, target=ARRAY_BUFFER)
         acc_pos = Accessor(bufferView=len(buffer_views), byteOffset=0,
                            componentType=FLOAT, count=len(pos_arr),
                            type=VEC3,
                            min=pos_arr.min(axis=0).tolist(),
                            max=pos_arr.max(axis=0).tolist())
-        bv_pos_i  = len(buffer_views)
         acc_pos_i = len(accessors)
         buffer_views.append(bv_pos)
         accessors.append(acc_pos)
 
         # UVs
-        uv_bytes   = _align4(uv_arr.tobytes())
-        bv_uv_off  = len(blob)
-        blob      += uv_bytes
+        bv_uv_off, bv_uv_len = _append(uv_arr.tobytes())
         bv_uv = BufferView(buffer=0, byteOffset=bv_uv_off,
-                           byteLength=len(uv_bytes), target=ARRAY_BUFFER)
+                           byteLength=bv_uv_len, target=ARRAY_BUFFER)
         acc_uv = Accessor(bufferView=len(buffer_views), byteOffset=0,
                           componentType=FLOAT, count=len(uv_arr), type=VEC2)
-        bv_uv_i   = len(buffer_views)
         acc_uv_i  = len(accessors)
         buffer_views.append(bv_uv)
         accessors.append(acc_uv)
 
         # Indices
-        idx_bytes  = _align4(idx_arr.tobytes())
-        bv_idx_off = len(blob)
-        blob      += idx_bytes
+        bv_idx_off, bv_idx_len = _append(idx_arr.tobytes())
         bv_idx = BufferView(buffer=0, byteOffset=bv_idx_off,
-                            byteLength=len(idx_bytes), target=ELEMENT_ARRAY_BUFFER)
+                            byteLength=bv_idx_len, target=ELEMENT_ARRAY_BUFFER)
         acc_idx = Accessor(bufferView=len(buffer_views), byteOffset=0,
                            componentType=UNSIGNED_INT, count=len(idx_arr), type=SCALAR)
-        bv_idx_i  = len(buffer_views)
         acc_idx_i = len(accessors)
         buffer_views.append(bv_idx)
         accessors.append(acc_idx)
@@ -440,38 +441,65 @@ def main():
     buildings = root.findall("building")
     print(f"Found {len(buildings)} building(s). Exporting at LOD {lod} ...")
 
+    # ── Scene analysis (same logic as exportToOBJ.py) ────────────────────────
+    all_ox = [float(b.findtext("origin").split()[0]) for b in buildings]
+    all_oy = [float(b.findtext("origin").split()[1]) for b in buildings]
+    offset = (min(all_ox), min(all_oy))
+    if offset != (0.0, 0.0):
+        print(f"Normalising coordinates: subtracting offset ({offset[0]:.1f}, {offset[1]:.1f})")
+
+    orders = set()
     max_col, max_row = 0, 0
     for b in buildings:
         order = b.findtext("order")
         if order:
+            orders.add(order.strip())
             col, row = int(order.split()[0]), int(order.split()[1])
             max_col = max(max_col, col)
             max_row = max(max_row, row)
+    is_grid = len(orders) > 1
+
+    all_xs = [float(b.findtext("xSize")) for b in buildings]
+    all_ys = [float(b.findtext("ySize")) for b in buildings]
+    city_w = max((ox - offset[0]) + xs for ox, xs in zip(all_ox, all_xs))
+    city_h = max((oy - offset[1]) + ys for oy, ys in zip(all_oy, all_ys))
 
     if ARGS.split:
         out_dir = ARGS.output
         os.makedirs(out_dir, exist_ok=True)
         for i, b in enumerate(buildings):
             g = GLTFGeom()
-            export_building(b, g, lod)
+            export_building(b, g, lod, offset)
             bid   = b.attrib.get("ID", f"b{i:04d}")
             fname = os.path.join(out_dir, f"{bid[:8]}_{i:04d}.glb")
             pack_gltf(g, fname)
         print(f"Written {len(buildings)} .glb files to {out_dir}/")
     else:
         geom = GLTFGeom()
-        generate_road_network(geom, max_col, max_row)
+
+        if is_grid:
+            generate_road_network(geom, max_col, max_row)
+        else:
+            margin = 20.0
+            geom.poly([(-margin, -margin, -0.05),
+                       (city_w+margin, -margin, -0.05),
+                       (city_w+margin, city_h+margin, -0.05),
+                       (-margin, city_h+margin, -0.05)],
+                      flat_uv(city_w+2*margin, city_h+2*margin), "Ground")
+
         for b in buildings:
-            export_building(b, geom, lod)
+            export_building(b, geom, lod, offset)
 
         parks_el = root.find("parks")
         if parks_el is not None:
             for park in parks_el.findall("park"):
                 txt = park.findtext("outline")
                 if txt:
-                    x0, y0, x1, y1 = [float(v) for v in txt.split()]
-                    geom.poly([(x0,y0,0.02),(x1,y0,0.02),(x1,y1,0.02),(x0,y1,0.02)],
-                              flat_uv(abs(x1-x0), abs(y1-y0)), "Park")
+                    coords = [float(v) for v in txt.split()]
+                    px0 = coords[0] - offset[0]; py0 = coords[1] - offset[1]
+                    px1 = coords[2] - offset[0]; py1 = coords[3] - offset[1]
+                    geom.poly([(px0,py0,0.02),(px1,py0,0.02),(px1,py1,0.02),(px0,py1,0.02)],
+                              flat_uv(abs(px1-px0), abs(py1-py0)), "Park")
 
         pack_gltf(geom, ARGS.output)
         print(f"Written {ARGS.output}")

@@ -224,12 +224,14 @@ def _opening_pts(ox, oy, oz, xs, ys, wall, wx, wy, ww, wh):
         y0, y1 = oy+ys-wx-ww, oy+ys-wx
         return [(ox,y1,z0),(ox,y0,z0),(ox,y0,z1),(ox,y1,z1)]
 
-def export_building(b, builder, lod):
+def export_building(b, builder, lod, offset=(0.0, 0.0)):
     bid      = b.attrib.get("ID", "bldg")
     wall_mat, roof_mat = building_mats(bid)
     builder.group(f"b_{bid[:8]}")
 
     ox, oy, oz = [float(v) for v in b.findtext("origin").split()]
+    ox -= offset[0]
+    oy -= offset[1]
     xs = float(b.findtext("xSize"))
     ys = float(b.findtext("ySize"))
     zs = float(b.findtext("zSize"))
@@ -390,14 +392,36 @@ def main():
 
     mats = build_material_table()
 
-    # Grid extent from building order elements
+    # ── Scene analysis ────────────────────────────────────────────────────────
+    # 1. Compute origin offset so every viewer sees the city near (0,0,0).
+    #    UTM coordinates (e.g. 257 000, 9 855 000) would place the scene
+    #    hundreds of km from the camera — this is the #1 cause of blank viewports.
+    all_ox = [float(b.findtext("origin").split()[0]) for b in buildings]
+    all_oy = [float(b.findtext("origin").split()[1]) for b in buildings]
+    offset = (min(all_ox), min(all_oy))
+    if offset != (0.0, 0.0):
+        print(f"Normalising coordinates: subtracting offset ({offset[0]:.1f}, {offset[1]:.1f})")
+
+    # 2. Detect whether buildings come from randomiseCity.py (regular grid,
+    #    varied order values) or from osmToXML.py (arbitrary positions, all
+    #    order="0 0").  Grid data gets the full road-strip network; OSM data
+    #    gets a simple ground plane so roads don't land in the wrong place.
+    orders = set()
     max_col, max_row = 0, 0
     for b in buildings:
         order = b.findtext("order")
         if order:
+            orders.add(order.strip())
             col, row = int(order.split()[0]), int(order.split()[1])
             max_col = max(max_col, col)
             max_row = max(max_row, row)
+    is_grid = len(orders) > 1
+
+    # City bounding box in local (normalised) coordinates
+    all_xs = [float(b.findtext("xSize")) for b in buildings]
+    all_ys = [float(b.findtext("ySize")) for b in buildings]
+    city_w = max((ox - offset[0]) + xs for ox, xs in zip(all_ox, all_xs))
+    city_h = max((oy - offset[1]) + ys for oy, ys in zip(all_oy, all_ys))
 
     if ARGS.split:
         out_dir = ARGS.output
@@ -406,7 +430,7 @@ def main():
         write_mtl(os.path.join(out_dir, mtl_name), mats)
         for i, b in enumerate(buildings):
             bld = OBJBuilder()
-            export_building(b, bld, lod)
+            export_building(b, bld, lod, offset)
             bid   = b.attrib.get("ID", f"b{i:04d}")
             fname = os.path.join(out_dir, f"{bid[:8]}_{i:04d}.obj")
             bld.write(fname, mtl_name)
@@ -419,10 +443,21 @@ def main():
         write_mtl(mtl_path, mats)
 
         builder = OBJBuilder()
-        generate_road_network(builder, max_col, max_row)
+
+        if is_grid:
+            generate_road_network(builder, max_col, max_row)
+        else:
+            # OSM data: just a ground plane sized to the actual city footprint
+            margin = 20.0
+            builder.group("ground")
+            builder.poly([(-margin, -margin, -0.05),
+                          (city_w+margin, -margin, -0.05),
+                          (city_w+margin, city_h+margin, -0.05),
+                          (-margin, city_h+margin, -0.05)],
+                         flat_uv(city_w+2*margin, city_h+2*margin), "Ground")
 
         for b in buildings:
-            export_building(b, builder, lod)
+            export_building(b, builder, lod, offset)
 
         parks_el = root.find("parks")
         if parks_el is not None:
@@ -430,9 +465,14 @@ def main():
             for park in parks_el.findall("park"):
                 txt = park.findtext("outline")
                 if txt:
-                    x0, y0, x1, y1 = [float(v) for v in txt.split()]
-                    builder.poly([(x0,y0,0.02),(x1,y0,0.02),(x1,y1,0.02),(x0,y1,0.02)],
-                                 flat_uv(abs(x1-x0), abs(y1-y0)), "Park")
+                    x0, y0, x1, y1 = [float(v) - offset[0] for v in txt.split()[:2]] + \
+                                      [float(v) - offset[1] for v in txt.split()[2:]]
+                    # parks have 4 values: ox0, oy0, ox1, oy1
+                    coords = [float(v) for v in txt.split()]
+                    px0 = coords[0] - offset[0]; py0 = coords[1] - offset[1]
+                    px1 = coords[2] - offset[0]; py1 = coords[3] - offset[1]
+                    builder.poly([(px0,py0,0.02),(px1,py0,0.02),(px1,py1,0.02),(px0,py1,0.02)],
+                                 flat_uv(abs(px1-px0), abs(py1-py0)), "Park")
 
         builder.write(out_path, mtl_name)
         print(f"Written {out_path}  ({len(builder.verts):,} vertices, {len(builder.faces):,} faces)")
