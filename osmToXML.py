@@ -20,7 +20,7 @@ Requirements:
     pip install requests lxml
 """
 
-import argparse, math, random, sys, uuid
+import argparse, math, random, re, sys, uuid
 from lxml import etree
 
 try:
@@ -135,86 +135,238 @@ out skel qt;
     resp.raise_for_status()
     return resp.json()
 
+def _chain_ways(member_ids, way_coords):
+    """
+    Chain multiple OSM way segments into a single closed ring.
+    member_ids: list of way IDs (in member order)
+    way_coords: dict of way_id → [(lat,lon), ...]
+    Returns a list of (lat,lon) forming a closed polygon, or [] on failure.
+    """
+    segments = [list(way_coords.get(wid, [])) for wid in member_ids if wid in way_coords]
+    segments = [s for s in segments if len(s) >= 2]
+    if not segments:
+        return []
+    if len(segments) == 1:
+        return segments[0]
+
+    # Greedy chaining: always append the segment whose start or end matches
+    # the current tail of the result ring.
+    result = list(segments[0])
+    remaining = segments[1:]
+    while remaining:
+        tail = result[-1]
+        matched = False
+        for i, seg in enumerate(remaining):
+            if seg[0] == tail:
+                result.extend(seg[1:])
+                remaining.pop(i); matched = True; break
+            if seg[-1] == tail:
+                result.extend(reversed(seg[:-1]))
+                remaining.pop(i); matched = True; break
+        if not matched:
+            # Can't chain cleanly — just concatenate the rest
+            for seg in remaining:
+                result.extend(seg)
+            break
+    return result
+
+
 def parse_osm(data):
     """
     Parse Overpass JSON into buildings, roads, and parks.
+    Handles both way-based and relation-based (multipolygon) building footprints
+    so complex L/U-shaped buildings are represented with their actual outline.
+
     Returns: (buildings, roads, parks)
       buildings: [{id, nodes:[(lat,lon)], tags}]
       roads:     [{id, nodes:[(lat,lon)], tags, width}]
       parks:     [{id, nodes:[(lat,lon)], tags}]
     """
+    # Index all nodes
     nodes = {}
     for el in data["elements"]:
         if el["type"] == "node":
             nodes[el["id"]] = (el["lat"], el["lon"])
 
+    # Index all way coordinate lists (needed for relation assembly)
+    way_coords = {}
+    for el in data["elements"]:
+        if el["type"] == "way":
+            coords = [nodes[n] for n in el.get("nodes", []) if n in nodes]
+            way_coords[el["id"]] = coords
+
     buildings, roads, parks = [], [], []
+
+    # ── Ways ──────────────────────────────────────────────────────────────────
     for el in data["elements"]:
         if el["type"] != "way":
             continue
-        tags = el.get("tags", {})
-        coords = [nodes[nid] for nid in el.get("nodes", []) if nid in nodes]
-        if len(coords) < 2:
-            continue
+        tags   = el.get("tags", {})
+        coords = way_coords.get(el["id"], [])
 
         if "building" in tags and len(coords) >= 4:
             buildings.append({"id": el["id"], "nodes": coords, "tags": tags})
 
         elif "highway" in tags:
-            hw = tags["highway"]
-            width = float(tags.get("width", ROAD_WIDTHS.get(hw, 4.0)))
-            roads.append({"id": el["id"], "nodes": coords, "tags": tags,
-                          "type": hw, "width": width})
+            if len(coords) >= 2:
+                hw    = tags["highway"]
+                width = float(tags.get("width", ROAD_WIDTHS.get(hw, 4.0)))
+                roads.append({"id": el["id"], "nodes": coords, "tags": tags,
+                              "type": hw, "width": width})
 
         elif any(k in tags for k in ("leisure", "landuse", "natural")):
             if len(coords) >= 4:
                 parks.append({"id": el["id"], "nodes": coords, "tags": tags})
 
+    # ── Relations (complex / multi-part buildings) ────────────────────────────
+    # Many large buildings in Nairobi are mapped as OSM relations with an
+    # "outer" ring assembled from several way segments.
+    seen_building_ids = {b["id"] for b in buildings}
+    for el in data["elements"]:
+        if el["type"] != "relation":
+            continue
+        tags = el.get("tags", {})
+        if "building" not in tags:
+            continue
+
+        # Collect outer-ring way IDs
+        outer_ids = [m["ref"] for m in el.get("members", [])
+                     if m.get("type") == "way" and m.get("role") in ("outer", "")]
+        if not outer_ids:
+            continue
+
+        ring = _chain_ways(outer_ids, way_coords)
+        if len(ring) >= 4:
+            buildings.append({"id": el["id"], "nodes": ring, "tags": tags})
+
     return buildings, roads, parks
 
 # ── Building attribute extraction ─────────────────────────────────────────────
 
+# Default floors by OSM building type — used only when no tag is available.
+# These are realistic medians, NOT random values.
+_FLOORS_BY_TYPE = {
+    "house": 1, "detached": 1, "semidetached_house": 2, "terrace": 2,
+    "bungalow": 1, "cabin": 1, "hut": 1, "static_caravan": 1,
+    "apartments": 4, "residential": 3, "dormitory": 3,
+    "office": 5, "commercial": 3, "retail": 2, "supermarket": 1,
+    "hotel": 6, "hospital": 4, "school": 2, "university": 3,
+    "warehouse": 1, "industrial": 2, "garage": 1, "shed": 1,
+    "church": 1, "mosque": 1, "cathedral": 2, "temple": 1,
+    "yes": 2,
+}
+
 def _tag_floors(tags):
-    for key in ("building:levels", "levels", "building:floors"):
+    """
+    Return (floors, source) where source is 'osm', 'height', or 'type'.
+    Never returns a random value — always based on real data or a type default.
+    """
+    # 1. Explicit floor count from OSM
+    for key in ("building:levels", "levels", "building:floors",
+                "building:storey", "building:storeys"):
         v = tags.get(key)
         if v:
-            try: return max(1, int(float(v)))
-            except ValueError: pass
-    return random.randint(1, 8)
+            try:
+                f = int(float(str(v).split(";")[0].strip()))
+                if 1 <= f <= 200:
+                    return f, "osm"
+            except (ValueError, AttributeError):
+                pass
+
+    # 2. Estimate from height tag (÷ 3.2 m per floor average)
+    h = _tag_height_raw(tags)
+    if h:
+        return max(1, round(h / 3.2)), "height"
+
+    # 3. Default from building type
+    btype = tags.get("building", "yes").lower()
+    return _FLOORS_BY_TYPE.get(btype, 2), "type"
+
+
+def _tag_height_raw(tags):
+    """Return the raw OSM height value in metres, or None."""
+    for key in ("height", "building:height", "max_height"):
+        v = tags.get(key)
+        if v:
+            s = str(v).strip()
+            try:
+                h = float(re.sub(r"[^\d.]", "", s.replace("ft", "")))
+                if "ft" in s.lower():
+                    h *= 0.3048
+                if 1.0 <= h <= 600.0:
+                    return round(h, 1)
+            except (ValueError, TypeError):
+                pass
+    return None
+
 
 def _tag_height(tags, floors):
-    v = tags.get("height") or tags.get("building:height")
-    if v:
-        try: return float(str(v).replace("m","").strip())
-        except ValueError: pass
-    floor_h = round(random.uniform(3.0, 3.5), 2)
-    return round(floors * floor_h, 2)
+    """
+    Return building height in metres.
+    Priority: OSM height tag → floors × floor_height → type-based default.
+    """
+    h = _tag_height_raw(tags)
+    if h:
+        return h
+    # Use a realistic per-floor height based on usage
+    btype = tags.get("building", "yes").lower()
+    floor_h = 4.5 if btype in ("warehouse", "industrial", "supermarket") else 3.2
+    return round(floors * floor_h, 1)
+
+
+def _tag_year(tags):
+    """
+    Extract year of construction from OSM tags.
+    Returns int year or None — NEVER fabricates a value.
+    """
+    for key in ("start_date", "construction_date", "building:year",
+                "year_of_construction", "opening_date", "building:start_date",
+                "building:construction_year"):
+        v = tags.get(key, "")
+        if v:
+            m = re.search(r'\b(1[5-9]\d{2}|20[012]\d)\b', str(v))
+            if m:
+                yr = int(m.group())
+                if 1500 <= yr <= 2025:
+                    return yr
+    return None
+
 
 def _tag_roof(tags):
     mapping = {
-        "flat":      "Flat",
-        "gabled":    "Gabled",
-        "hipped":    "Hipped",
-        "pyramidal": "Pyramidal",
-        "shed":      "Shed",
-        "dome":      "Pyramidal",
-        "onion":     "Pyramidal",
-        "mansard":   "Hipped",
-        "gambrel":   "Gabled",
+        "flat": "Flat", "gabled": "Gabled", "hipped": "Hipped",
+        "pyramidal": "Pyramidal", "shed": "Shed", "dome": "Pyramidal",
+        "onion": "Pyramidal", "mansard": "Hipped", "gambrel": "Gabled",
+        "skillion": "Shed", "saltbox": "Gabled",
     }
     shape = tags.get("roof:shape", "").lower()
-    return mapping.get(shape, random.choice(["Flat","Flat","Gabled","Hipped","Pyramidal","Shed"]))
+    if shape in mapping:
+        return mapping[shape]
+    # Default by building type — flat for commercial/industrial, varied for residential
+    btype = tags.get("building", "yes").lower()
+    if btype in ("warehouse", "industrial", "supermarket", "garage", "office",
+                 "commercial", "retail", "hospital", "school"):
+        return "Flat"
+    return random.choice(["Flat", "Flat", "Gabled", "Hipped"])
+
 
 def _tag_usage(tags):
-    b = tags.get("building","yes").lower()
-    amenity = tags.get("amenity","").lower()
-    if b in ("residential","apartments","house","detached","terrace"):
+    b       = tags.get("building", "yes").lower()
+    amenity = tags.get("amenity", "").lower()
+    landuse = tags.get("landuse", "").lower()
+    shop    = tags.get("shop", "")
+    if b in ("residential", "apartments", "house", "detached",
+             "semidetached_house", "terrace", "bungalow", "dormitory"):
         return "Residential"
-    if b in ("commercial","retail","office","shop"):
-        return "industrial"
-    if amenity in ("school","hospital","clinic"):
-        return "Residential"
-    return "Residential"
+    if b in ("commercial", "retail", "office", "supermarket",
+             "hotel", "bank") or shop:
+        return "Commercial"
+    if b in ("industrial", "warehouse", "factory"):
+        return "Industrial"
+    if amenity in ("school", "hospital", "clinic", "university", "college",
+                   "place_of_worship", "community_centre"):
+        return "Civic"
+    return "Residential"  # default for unknown
 
 # ── Footprint → bounding box ──────────────────────────────────────────────────
 
@@ -240,47 +392,45 @@ def footprint_bbox_utm(nodes):
 # ── XML writer ────────────────────────────────────────────────────────────────
 
 def building_to_xml(parent, bldg, ox, oy, oz, xs, ys, zs, floors, floor_h,
-                    rtype, usage, bid):
+                    rtype, usage, bid, year=None, name=None):
     b = etree.SubElement(parent, "building")
     b.attrib["ID"] = bid
 
-    etree.SubElement(b, "footprint").text = "Rectangular"
-    etree.SubElement(b, "origin").text    = f"{ox} {oy} {oz}"
-    etree.SubElement(b, "order").text     = "0 0"   # positional order not needed for real data
-    etree.SubElement(b, "rotation").text  = "0"
-    etree.SubElement(b, "xSize").text     = str(xs)
-    etree.SubElement(b, "ySize").text     = str(ys)
-    etree.SubElement(b, "zSize").text     = str(round(zs, 2))
-    etree.SubElement(b, "floors").text    = str(floors)
-    etree.SubElement(b, "floorHeight").text = str(round(floor_h, 2))
-    etree.SubElement(b, "embrasure").text   = str(round(random.uniform(0.05, 0.15), 2))
+    etree.SubElement(b, "footprint").text    = "Rectangular"
+    etree.SubElement(b, "origin").text       = f"{ox} {oy} {oz}"
+    etree.SubElement(b, "order").text        = "0 0"
+    etree.SubElement(b, "rotation").text     = "0"
+    etree.SubElement(b, "xSize").text        = str(xs)
+    etree.SubElement(b, "ySize").text        = str(ys)
+    etree.SubElement(b, "zSize").text        = str(round(zs, 2))
+    etree.SubElement(b, "floors").text       = str(floors)
+    etree.SubElement(b, "floorHeight").text  = str(round(floor_h, 2))
+    etree.SubElement(b, "embrasure").text    = "0.10"
     etree.SubElement(b, "WallThickness").text = "0.20"
-    etree.SubElement(b, "joist").text         = str(round(random.uniform(0.2, 0.3), 2))
+    etree.SubElement(b, "joist").text        = "0.25"
 
     roof = etree.SubElement(b, "roof")
     etree.SubElement(roof, "roofType").text = rtype
     if rtype != "Flat":
-        h_val = round(random.uniform(2.0, min(3.8, zs * 0.4)), 2)
+        h_val = round(min(3.5, zs * 0.35), 2)
         etree.SubElement(roof, "h").text = str(h_val)
         if rtype in ("Hipped", "Pyramidal"):
-            etree.SubElement(roof, "r").text = str(round(ys * random.uniform(0.3, 0.45), 2))
+            etree.SubElement(roof, "r").text = str(round(ys * 0.35, 2))
     ovh = etree.SubElement(roof, "overhangs")
-    etree.SubElement(ovh, "xlength").text = str(round(random.uniform(0.1, 0.5), 2))
-    etree.SubElement(ovh, "ylength").text = str(round(random.uniform(0.1, 0.5), 2))
+    etree.SubElement(ovh, "xlength").text = "0.30"
+    etree.SubElement(ovh, "ylength").text = "0.30"
 
     props = etree.SubElement(b, "properties")
     etree.SubElement(props, "roofType").text = rtype
     etree.SubElement(props, "usage").text    = usage
-    current_year = 2024
-    age = random.randint(1, 60)
-    etree.SubElement(props, "age").text              = str(age)
-    etree.SubElement(props, "yearOfConstruction").text = str(current_year - age)
-    etree.SubElement(props, "roofClearance").text    = random.choice(["yes","no"])
-    etree.SubElement(props, "valuation").text        = str(random.randint(1, 5))
+    # Year of construction — only if confirmed from OSM tags; never fabricated
+    etree.SubElement(props, "yearOfConstruction").text = str(year) if year else "Unknown"
+    etree.SubElement(props, "valuation").text = "—"   # not available from OSM
 
-    # OSM source ID for traceability
-    src = etree.SubElement(props, "osmID")
-    src.text = str(bldg["id"])
+    # OSM metadata
+    etree.SubElement(props, "osmID").text = str(bldg["id"])
+    if name:
+        etree.SubElement(props, "name").text = name
 
     return b
 
@@ -328,14 +478,17 @@ def main():
             continue
         ox, oy, xs, ys = bbox
         tags    = bldg["tags"]
-        floors  = _tag_floors(tags)
+        floors, _src = _tag_floors(tags)
         zs      = _tag_height(tags, floors)
         floor_h = round(zs / floors, 2)
         rtype   = _tag_roof(tags)
         usage   = _tag_usage(tags)
+        year    = _tag_year(tags)
+        name    = tags.get("name") or tags.get("building:name") or None
         bid     = str(uuid.uuid4())
         b_el    = building_to_xml(root, bldg, ox, oy, 0.0, xs, ys, zs,
-                                  floors, floor_h, rtype, usage, bid)
+                                  floors, floor_h, rtype, usage, bid,
+                                  year=year, name=name)
 
         # Store the actual polygon nodes in UTM so exportToGeoJSON.py can
         # reconstruct the real building footprint (not just the bounding box).
