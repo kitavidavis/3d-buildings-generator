@@ -837,7 +837,7 @@ def streetgenerator(specs, CELLSIZE, grid, skipx, skipy):
         for c in range(0, col+1, skipy):
             p0x = r * CELLSIZE - separation
             if(r + skipx) * CELLSIZE - separation - width >= row * CELLSIZE:
-                pix = row * CELLSIZE + CELLSIZE
+                p1x = row * CELLSIZE + CELLSIZE
             else:
                 p1x = (r + skipx) * CELLSIZE - separation - width
             p0y = c * CELLSIZE - separation
@@ -903,6 +903,10 @@ bspecs, cell = buildingGenerator(n, vgcells, CRS)
 
 #-- Generate streets
 if STREETS:
+    bspecs = streetgenerator(bspecs, CELLSIZE, cell, skipx=2, skipy=2)
+
+#-- Generate vegetation
+if VEGETATION:
     bspecs = vegetationgenerator(bspecs, CELLSIZE, vgcells, n)
 
 #-- Write the specs in an xml form

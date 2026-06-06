@@ -1,7 +1,6 @@
 """
 Generate CityGML files according to the building XML specifications.
 """
-from __future__ import print_function
 from lxml import etree
 import argparse
 import random
@@ -5674,9 +5673,9 @@ for b in buildings:
                     #-- Iterate cityObjectMembers
                     if entity.tag == "cityObjectMember":
                         #-- Select the current one
-                        if entity.getchildren()[0].attrib['{%s}id' % ns_gml] == ID:
+                        if list(entity)[0].attrib['{%s}id' % ns_gml] == ID:
                             #-- Get the building XML node
-                            curr_b_inxml = entity.getchildren()[0]
+                            curr_b_inxml = list(entity)[0]
                             #-- Store all the <gml:posList> in a list
                             posList_to_rotate = curr_b_inxml.findall(".//{%s}posList" % ns_gml)
                             for pos in posList_to_rotate:
