@@ -40,7 +40,7 @@ REQUIREMENTS:
   pip install requests lxml
 """
 
-import argparse, gzip, io, json, math, os, re, sys, uuid
+import argparse, gzip, io, json, math, os, re, sys, time, uuid
 from lxml import etree
 
 try:
@@ -66,7 +66,9 @@ ARGS = PARSER.parse_args()
 # ── City centres (EPSG:4326) ──────────────────────────────────────────────────
 
 CITY_CENTRES = {
-    "Nairobi":  (-1.2921,  36.8219),
+    # Nairobi: centred on the CBD triangle (Times Tower / KICC / Parliament)
+    # Use --radius 800 to capture Times Tower (560 m) and KICC (820 m).
+    "Nairobi":  (-1.2884,  36.8218),
     "Mombasa":  (-4.0435,  39.6682),
     "Kisumu":   (-0.1022,  34.7617),
     "Nakuru":   (-0.3031,  36.0800),
@@ -230,14 +232,49 @@ ROAD_WIDTHS = {
     "path":1.5,"cycleway":2,"living_street":4,"pedestrian":4,
 }
 
+def _overpass_post(query, timeout_s, retries=3):
+    """POST to Overpass with retry on 429/504."""
+    headers = {"User-Agent": "3D-Cadastre-Kenya/1.0"}
+    for attempt in range(retries):
+        try:
+            r = requests.post(OVERPASS_URL, data={"data": query},
+                              headers=headers, timeout=timeout_s+30)
+            r.raise_for_status()
+            return r.json()
+        except requests.exceptions.HTTPError as e:
+            code = e.response.status_code if e.response is not None else 0
+            if code in (429, 504) and attempt < retries-1:
+                wait = 15 * (attempt+1)
+                print(f"    Overpass {code}, retrying in {wait}s …")
+                time.sleep(wait)
+            else:
+                raise
+    return {"elements": []}
+
+
 def fetch_osm_data(lat, lon, radius):
-    """Fetch OSM buildings + roads + parks for the area."""
-    api_timeout = min(180, max(60, radius//10))
-    query = f"""
-[out:json][timeout:{api_timeout}];
+    """
+    Fetch OSM buildings + roads + parks in two separate queries to avoid
+    Overpass 504 timeouts on large radii.
+    """
+    t = min(120, max(60, radius // 8))
+
+    # Query 1: buildings only (for attribute matching — most important)
+    q_bldg = f"""
+[out:json][timeout:{t}];
 (
   way["building"](around:{radius},{lat},{lon});
   relation["building"](around:{radius},{lat},{lon});
+);
+out body;>;out skel qt;
+"""
+    print(f"  Fetching OSM buildings within {radius} m …")
+    bldg_data = _overpass_post(q_bldg, t)
+
+    # Query 2: roads + parks (smaller, much faster)
+    q_env = f"""
+[out:json][timeout:60];
+(
   way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|service|unclassified|footway|path|cycleway|living_street|pedestrian)$"](around:{radius},{lat},{lon});
   way["leisure"~"^(park|garden|recreation_ground|pitch|playground)$"](around:{radius},{lat},{lon});
   way["landuse"~"^(park|grass|forest|recreation_ground|village_green|meadow)$"](around:{radius},{lat},{lon});
@@ -245,12 +282,16 @@ def fetch_osm_data(lat, lon, radius):
 );
 out body;>;out skel qt;
 """
-    print(f"  Fetching OSM attributes within {radius} m …")
-    headers = {"User-Agent": "3D-Cadastre-Kenya/1.0"}
-    r = requests.post(OVERPASS_URL, data={"data": query}, headers=headers,
-                      timeout=api_timeout+30)
-    r.raise_for_status()
-    return r.json()
+    print(f"  Fetching OSM roads + parks …")
+    try:
+        env_data = _overpass_post(q_env, 60)
+    except Exception as e:
+        print(f"    Roads/parks query failed ({e}), continuing without them")
+        env_data = {"elements": []}
+
+    # Merge both responses into one element list
+    merged = {"elements": bldg_data.get("elements", []) + env_data.get("elements", [])}
+    return merged
 
 def parse_osm_buildings(data):
     """
@@ -380,13 +421,33 @@ def _usage(tags):
     return "Unknown"
 
 def _heuristic_floors(area_m2):
-    """Estimate floors from Microsoft footprint area when no OSM match."""
-    if area_m2 > 5000: return 8
-    if area_m2 > 2000: return 5
-    if area_m2 > 1000: return 4
-    if area_m2 >  500: return 3
-    if area_m2 >  200: return 2
+    """
+    Estimate floors from Microsoft footprint area when no OSM match found.
+    Note: area alone is a poor predictor of height — a large footprint can be
+    a 1-floor warehouse or a 30-floor tower. OSM matching gives the real value.
+    These are conservative minimums, not averages.
+    """
+    if area_m2 > 10000: return 15   # very large complex (conference centre, hotel)
+    if area_m2 >  5000: return 8    # large office block
+    if area_m2 >  2000: return 5
+    if area_m2 >  1000: return 4
+    if area_m2 >   500: return 3
+    if area_m2 >   200: return 2
     return 1
+
+
+def _adaptive_match_radius(area_m2, base_radius):
+    """
+    Large buildings like Times Tower and KICC have a large footprint, so the
+    Microsoft AI centroid and the OSM-mapped centroid can differ by 50-100 m
+    (e.g. MS sees the whole podium+tower complex; OSM maps just the tower shaft).
+    Use a larger match radius for larger footprints so these landmarks still get
+    their correct floor count and name from OSM.
+    """
+    if area_m2 > 5000: return base_radius * 6   # ~180 m for very large buildings
+    if area_m2 > 1000: return base_radius * 3   # ~90 m for large buildings
+    if area_m2 >  500: return base_radius * 2   # ~60 m for medium buildings
+    return base_radius
 
 # ── XML writer ────────────────────────────────────────────────────────────────
 
@@ -512,7 +573,7 @@ def main():
 
     # ── Step 5: match Microsoft ↔ OSM ─────────────────────────────────────────
     print(f"\n[4/4] Matching footprints to OSM attributes …")
-    match_r = ARGS.match_radius
+    base_match_r = ARGS.match_radius
 
     matched = 0
     root = etree.Element("specifications")
@@ -522,7 +583,13 @@ def main():
         ms_clat, ms_clon = centroid(coords)
         area_m2  = polygon_area_m2(coords)
 
-        # Find nearest OSM building centroid
+        # Adaptive match radius: large buildings (Times Tower, KICC, etc.) can
+        # have Microsoft centroid offset 50-100 m from the OSM-mapped centroid
+        # because Microsoft detects the full building complex while OSM maps
+        # just the tower shaft, or vice versa.
+        eff_match_r = _adaptive_match_radius(area_m2, base_match_r)
+
+        # Find nearest OSM building centroid within the effective radius
         best_osm  = None
         best_dist = float("inf")
         for ob in osm_bldgs:
@@ -531,28 +598,56 @@ def main():
                 best_dist = d
                 best_osm  = ob
 
-        if best_osm and best_dist <= match_r:
-            # Matched — use OSM attributes
+        if best_osm and best_dist <= eff_match_r:
+            # Matched — take Microsoft polygon shape + OSM metadata
             tags   = best_osm["tags"]
             osm_id = best_osm["id"]
             name   = tags.get("name") or tags.get("building:name") or None
-            floors, _ = _floors(tags)
+            floors, src = _floors(tags)
             zs     = _height(tags, floors)
             usage  = _usage(tags)
             year   = _year(tags)
-            rtype  = ("Flat" if tags.get("building","").lower() in
-                      ("warehouse","industrial","supermarket","office","commercial")
-                      else "Flat")   # simple default; roof shape not in MS data
+            rtype  = "Flat"   # roof shape not captured by Microsoft AI
             matched += 1
         else:
-            # Unmatched — heuristics from footprint size
-            floors  = _heuristic_floors(area_m2)
-            zs      = round(floors * 3.2, 1)
-            usage   = "Unknown"
-            year    = None
-            name    = None
-            osm_id  = None
-            rtype   = "Flat"
+            # Primary match failed.
+            # Last-chance pass: some landmark towers (Times Tower, KICC) have
+            # large height values in OSM but their centroid can be > eff_match_r
+            # away from the Microsoft centroid if OSM maps the full complex and
+            # MS maps only the tower core, or vice versa. Expand to 200m for any
+            # OSM building that has explicit height or level data — those values
+            # are precious and shouldn't be lost to a centroid offset.
+            fallback_osm = None
+            fallback_dist = float("inf")
+            FALLBACK_R = 200.0
+            for ob in osm_bldgs:
+                ob_tags = ob["tags"]
+                if not (_height_raw(ob_tags) or ob_tags.get("building:levels")):
+                    continue   # no valuable height data — skip in fallback
+                d = haversine_m(ms_clat, ms_clon, ob["centroid"][0], ob["centroid"][1])
+                if d < fallback_dist:
+                    fallback_dist = d
+                    fallback_osm  = ob
+
+            if fallback_osm and fallback_dist <= FALLBACK_R:
+                tags   = fallback_osm["tags"]
+                osm_id = fallback_osm["id"]
+                name   = tags.get("name") or tags.get("building:name") or None
+                floors, _ = _floors(tags)
+                zs     = _height(tags, floors)
+                usage  = _usage(tags)
+                year   = _year(tags)
+                rtype  = "Flat"
+                matched += 1
+            else:
+                # Truly unmatched — heuristics from footprint size only
+                floors  = _heuristic_floors(area_m2)
+                zs      = round(floors * 3.2, 1)
+                usage   = "Unknown"
+                year    = None
+                name    = None
+                osm_id  = None
+                rtype   = "Flat"
 
         # Bounding box in UTM (for origin/xSize/ySize in XML)
         utm_pts = [latlon_to_utm37s(lat, lon) for lon, lat in coords]
