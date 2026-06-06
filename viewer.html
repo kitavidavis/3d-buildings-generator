@@ -5,149 +5,165 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Kenya 3D Cadastre Viewer</title>
 
-<!-- Leaflet basemap -->
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<!-- MapLibre GL (geographic 3D viewer) -->
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet"/>
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+
+<!-- Babylon.js (game-engine 3D viewer for .glb) -->
+<script src="https://cdn.babylonjs.com/babylon.js"></script>
+<script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
 
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #0f1117; font-family: 'Segoe UI', system-ui, sans-serif;
-         color: #e2e8f0; overflow: hidden; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0f1117; font-family: 'Segoe UI', system-ui, sans-serif;
+       color: #e2e8f0; overflow: hidden; }
 
-  /* Map sits in the background */
-  #map {
-    position: fixed; inset: 0; z-index: 0;
-    filter: brightness(0.55) saturate(0.8);
-  }
+/* MapLibre container — fills viewport */
+#mapgl { position: fixed; inset: 0; z-index: 0; display: none; }
 
-  /* Babylon canvas on top — transparent background */
-  #canvas {
-    position: fixed; inset: 0; width: 100%; height: 100%;
-    z-index: 1; background: transparent;
-  }
+/* Babylon canvas */
+#canvas { position: fixed; inset: 0; width: 100%; height: 100%;
+          z-index: 1; background: transparent; display: none; }
 
-  /* All UI above canvas */
-  #topbar, #panel, #controls, #drop, #tooltip { z-index: 10; }
+/* All UI always on top */
+#topbar, #panel, #controls, #drop, #tooltip { position: fixed; z-index: 20; }
 
-  /* ── Top bar ── */
-  #topbar {
-    position: fixed; top: 0; left: 0; right: 0; height: 48px;
-    background: rgba(10,12,18,0.88); backdrop-filter: blur(8px);
-    border-bottom: 1px solid #2d3748;
-    display: flex; align-items: center; gap: 12px; padding: 0 16px;
-  }
-  #topbar .logo { font-size: 13px; font-weight: 700; color: #63b3ed;
-                  letter-spacing: .05em; white-space: nowrap; }
-  #topbar .sep  { color: #4a5568; }
-  #topbar .hint { font-size: 12px; color: #718096; }
-  #stats { margin-left: auto; font-size: 12px; color: #a0aec0; }
+/* ── Top bar ── */
+#topbar {
+  top: 0; left: 0; right: 0; height: 48px;
+  background: rgba(10,12,18,0.90); backdrop-filter: blur(8px);
+  border-bottom: 1px solid #2d3748;
+  display: none; align-items: center; gap: 12px; padding: 0 16px;
+}
+.logo { font-size: 13px; font-weight: 700; color: #63b3ed; letter-spacing:.05em; }
+.sep  { color: #4a5568; }
+.hint { font-size: 12px; color: #718096; }
+#stats { margin-left: auto; font-size: 12px; color: #a0aec0; }
+#mode-badge {
+  font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 600;
+  background: #2d3748; color: #a0aec0; white-space: nowrap;
+}
+#mode-badge.geo  { background: #1a365d; color: #90cdf4; }
+#mode-badge.model{ background: #322659; color: #d6bcfa; }
 
-  /* ── Drop overlay ── */
-  #drop {
-    position: fixed; inset: 0; display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    background: rgba(10,12,18,0.96);
-  }
-  #drop h1 { font-size: 22px; font-weight: 700; color: #63b3ed; margin-bottom: 8px; }
-  #drop p  { font-size: 14px; color: #a0aec0; margin-bottom: 28px; text-align:center;
-             max-width: 340px; line-height: 1.6; }
-  #dropzone {
-    width: 320px; height: 180px; border: 2px dashed #4a5568; border-radius: 12px;
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 10px; cursor: pointer; transition: border-color .2s, background .2s;
-  }
-  #dropzone:hover, #dropzone.over { border-color: #63b3ed; background: rgba(99,179,237,.06); }
-  #dropzone .icon { font-size: 36px; }
-  #dropzone span  { font-size: 13px; color: #a0aec0; }
-  #fileInput { display: none; }
-  #drop small { margin-top: 16px; font-size: 11px; color: #4a5568; }
+/* ── Drop overlay ── */
+#drop {
+  inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  background: rgba(10,12,18,0.97);
+}
+#drop h1 { font-size: 22px; font-weight: 700; color: #63b3ed; margin-bottom: 8px; }
+#drop p  { font-size: 14px; color: #a0aec0; margin-bottom: 28px;
+           text-align: center; max-width: 380px; line-height: 1.6; }
+.drop-row { display: flex; gap: 16px; }
+.dropzone {
+  width: 220px; height: 160px; border: 2px dashed #4a5568; border-radius: 12px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; cursor: pointer; transition: border-color .2s, background .2s;
+  text-align: center; padding: 12px;
+}
+.dropzone:hover, .dropzone.over { border-color: #63b3ed; background: rgba(99,179,237,.06); }
+.dropzone .icon { font-size: 28px; }
+.dropzone .title { font-size: 12px; font-weight: 600; color: #e2e8f0; }
+.dropzone .sub   { font-size: 11px; color: #718096; }
+.dropzone.geo-zone   { border-color: #2b6cb0; }
+.dropzone.model-zone { border-color: #553c9a; }
+.geo-zone:hover   { border-color: #63b3ed !important; }
+.model-zone:hover { border-color: #b794f4 !important; }
+input[type=file] { display: none; }
 
-  /* ── Info panel ── */
-  #panel {
-    position: fixed; top: 56px; right: 16px; width: 280px;
-    background: rgba(10,12,18,0.95); backdrop-filter: blur(8px);
-    border: 1px solid #2d3748; border-radius: 10px; padding: 16px;
-    transform: translateX(320px); transition: transform .25s ease;
-  }
-  #panel.open { transform: translateX(0); }
-  #panel-close {
-    position: absolute; top: 10px; right: 12px; background: none; border: none;
-    color: #718096; font-size: 18px; cursor: pointer; line-height: 1;
-  }
-  #panel-close:hover { color: #e2e8f0; }
-  #panel h2 { font-size: 14px; font-weight: 700; color: #63b3ed;
-              margin-bottom: 14px; padding-right: 20px; word-break: break-all; }
-  .row { display: flex; justify-content: space-between; align-items: baseline;
-         padding: 5px 0; border-bottom: 1px solid #1a202c; }
-  .row:last-child { border-bottom: none; }
-  .row .label { font-size: 11px; color: #718096; text-transform: uppercase;
-                letter-spacing: .06em; }
-  .row .value { font-size: 13px; color: #e2e8f0; font-weight: 500;
-                text-align: right; max-width: 160px; }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px;
-           font-size: 11px; font-weight: 600; }
-  .badge.res { background: #2c5282; color: #90cdf4; }
-  .badge.com { background: #744210; color: #fbd38d; }
-  .badge.ind { background: #22543d; color: #9ae6b4; }
-  #osm-link { font-size: 11px; color: #63b3ed; text-decoration: none;
-              display: block; margin-top: 10px; text-align: center; }
-  #osm-link:hover { text-decoration: underline; }
+/* ── Info panel ── */
+#panel {
+  top: 56px; right: 16px; width: 280px;
+  background: rgba(10,12,18,0.95); backdrop-filter: blur(8px);
+  border: 1px solid #2d3748; border-radius: 10px; padding: 16px;
+  transform: translateX(320px); transition: transform .25s ease;
+}
+#panel.open { transform: translateX(0); }
+#panel-close {
+  position: absolute; top: 10px; right: 12px; background: none; border: none;
+  color: #718096; font-size: 18px; cursor: pointer; line-height: 1;
+}
+#panel-close:hover { color: #e2e8f0; }
+#panel h2 { font-size: 14px; font-weight: 700; color: #63b3ed;
+            margin-bottom: 14px; padding-right: 20px; word-break: break-all; }
+.row { display: flex; justify-content: space-between; align-items: baseline;
+       padding: 5px 0; border-bottom: 1px solid #1a202c; }
+.row:last-child { border-bottom: none; }
+.row .label { font-size: 11px; color: #718096; text-transform: uppercase; letter-spacing:.06em; }
+.row .value { font-size: 13px; color: #e2e8f0; font-weight: 500; text-align: right; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.badge.res { background: #2c5282; color: #90cdf4; }
+.badge.com { background: #744210; color: #fbd38d; }
+.badge.ind { background: #22543d; color: #9ae6b4; }
+#osm-link { font-size: 11px; color: #63b3ed; text-decoration: none;
+            display: block; margin-top: 10px; text-align: center; }
+#osm-link:hover { text-decoration: underline; }
 
-  /* ── Controls ── */
-  #controls {
-    position: fixed; bottom: 16px; right: 16px;
-    display: flex; flex-direction: column; gap: 6px;
-  }
-  .ctrl-btn {
-    background: rgba(10,12,18,0.88); border: 1px solid #2d3748;
-    color: #a0aec0; border-radius: 6px; padding: 6px 12px; font-size: 12px;
-    cursor: pointer; transition: all .15s; backdrop-filter: blur(4px);
-  }
-  .ctrl-btn:hover { background: #1a202c; color: #e2e8f0; }
+/* ── Controls ── */
+#controls {
+  bottom: 16px; right: 16px;
+  display: none; flex-direction: column; gap: 6px;
+}
+.ctrl-btn {
+  background: rgba(10,12,18,0.90); border: 1px solid #2d3748;
+  color: #a0aec0; border-radius: 6px; padding: 6px 12px; font-size: 12px;
+  cursor: pointer; transition: all .15s; backdrop-filter: blur(4px);
+}
+.ctrl-btn:hover { background: #1a202c; color: #e2e8f0; }
 
-  /* ── Attribution ── */
-  #attrib {
-    position: fixed; bottom: 4px; left: 8px; font-size: 10px;
-    color: #4a5568; pointer-events: none;
-  }
-
-  /* ── Tooltip ── */
-  #tooltip {
-    position: fixed; pointer-events: none; background: rgba(10,12,18,0.9);
-    border: 1px solid #2d3748; border-radius: 6px; padding: 5px 10px;
-    font-size: 12px; color: #e2e8f0; display: none;
-  }
+/* ── Tooltip ── */
+#tooltip {
+  pointer-events: none; background: rgba(10,12,18,0.9);
+  border: 1px solid #2d3748; border-radius: 6px; padding: 5px 10px;
+  font-size: 12px; color: #e2e8f0; display: none;
+}
 </style>
 </head>
 <body>
 
-<!-- Layer 0: Leaflet basemap -->
-<div id="map"></div>
+<!-- Geographic 3D map (MapLibre GL — for .geojson) -->
+<div id="mapgl"></div>
 
-<!-- Layer 1: Babylon.js 3D scene (transparent bg) -->
+<!-- Babylon.js 3D viewer (for .glb) -->
 <canvas id="canvas"></canvas>
 
 <div id="tooltip"></div>
 
 <!-- Drop screen -->
 <div id="drop">
-  <h1>🏙️ Kenya 3D Cadastre</h1>
-  <p>Load a .glb file exported from exportToGLTF.py.<br>
-     Click any building to view its cadastral details.</p>
-  <div id="dropzone" onclick="document.getElementById('fileInput').click()">
-    <span class="icon">📂</span>
-    <span>Drop .glb here or click to browse</span>
+  <h1>🏙️ Kenya 3D Cadastre Viewer</h1>
+  <p>Choose the file type to load. The <strong>geographic viewer</strong> aligns
+     buildings exactly with the OSM basemap. The <strong>3D model viewer</strong>
+     is for detailed inspection and game engine export.</p>
+  <div class="drop-row">
+
+    <div class="dropzone geo-zone" id="dz-geo"
+         onclick="document.getElementById('fi-geo').click()">
+      <span class="icon">🗺️</span>
+      <span class="title">Geographic Viewer</span>
+      <span class="sub">Drop .geojson<br>(from exportToGeoJSON.py)<br>Aligns with OSM map</span>
+    </div>
+    <input type="file" id="fi-geo" accept=".geojson,.json">
+
+    <div class="dropzone model-zone" id="dz-glb"
+         onclick="document.getElementById('fi-glb').click()">
+      <span class="icon">🏗️</span>
+      <span class="title">3D Model Viewer</span>
+      <span class="sub">Drop .glb<br>(from exportToGLTF.py)<br>Detailed 3D + click info</span>
+    </div>
+    <input type="file" id="fi-glb" accept=".glb">
+
   </div>
-  <input type="file" id="fileInput" accept=".glb">
-  <small>Works with any .glb from 3D Cadastre Kenya</small>
 </div>
 
 <!-- Top bar -->
-<div id="topbar" style="display:none">
+<div id="topbar">
   <span class="logo">🏙️ Kenya 3D Cadastre</span>
   <span class="sep">|</span>
-  <span class="hint">Click building for details &nbsp;·&nbsp; Scroll = zoom &nbsp;·&nbsp; Drag = rotate &nbsp;·&nbsp; Right-drag = pan</span>
+  <span class="hint" id="hint-text"></span>
   <span id="stats"></span>
+  <span id="mode-badge"></span>
 </div>
 
 <!-- Info panel -->
@@ -158,175 +174,320 @@
   <a id="osm-link" target="_blank" style="display:none">View on OpenStreetMap ↗</a>
 </div>
 
-<!-- Controls -->
-<div id="controls" style="display:none">
-  <button class="ctrl-btn" onclick="resetCamera()">⟳ Reset view</button>
-  <button class="ctrl-btn" onclick="toggleWireframe()">⬜ Wireframe</button>
-  <button class="ctrl-btn" onclick="toggleMap()">🗺 Basemap</button>
-</div>
+<!-- Controls (mode-specific buttons injected by JS) -->
+<div id="controls"></div>
 
-<div id="attrib">Map © OpenStreetMap contributors</div>
-
-<script src="https://cdn.babylonjs.com/babylon.js"></script>
-<script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
 <script>
-let engine, scene, camera, leafletMap, highlighted = null, wireMode = false, mapVisible = true;
 const tooltip = document.getElementById('tooltip');
 
-// ── Leaflet initialisation ────────────────────────────────────────────────────
-leafletMap = L.map('map', { zoomControl: false, attributionControl: false })
-              .setView([-1.2921, 36.8219], 16);  // default: Nairobi CBD
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 19
-}).addTo(leafletMap);
+// ── Drop zone wiring ──────────────────────────────────────────────────────────
 
-// Disable all Leaflet interaction — it's a display-only basemap
-leafletMap.dragging.disable();
-leafletMap.touchZoom.disable();
-leafletMap.doubleClickZoom.disable();
-leafletMap.scrollWheelZoom.disable();
-leafletMap.keyboard.disable();
-
-// ── UTM Zone 37S → lat/lon (approximate, good to ~2 m for Kenya) ─────────────
-function utm37s_to_latlon(easting, northing) {
-  const a = 6378137, f = 1/298.257223563, b = a*(1-f);
-  const e2 = 1-(b/a)**2, k0 = 0.9996, lon0 = 39*Math.PI/180;
-  const E = easting - 500000;
-  const N = northing - 10000000;   // southern hemisphere false northing
-  const e1 = (1-Math.sqrt(1-e2))/(1+Math.sqrt(1-e2));
-  const M = N/k0;
-  const mu = M/(a*(1-e2/4-3*e2**2/64-5*e2**3/256));
-  const phi1 = mu
-    +(3*e1/2-27*e1**3/32)*Math.sin(2*mu)
-    +(21*e1**2/16-55*e1**4/32)*Math.sin(4*mu)
-    +(151*e1**3/96)*Math.sin(6*mu);
-  const N1 = a/Math.sqrt(1-e2*Math.sin(phi1)**2);
-  const T1 = Math.tan(phi1)**2;
-  const C1 = e2/(1-e2)*Math.cos(phi1)**2;
-  const R1 = a*(1-e2)/(1-e2*Math.sin(phi1)**2)**1.5;
-  const D  = E/(N1*k0);
-  const lat = phi1-(N1*Math.tan(phi1)/R1)*(D**2/2-(5+3*T1+10*C1-4*C1**2-9*e2/(1-e2))*D**4/24);
-  const lon = lon0+(D-(1+2*T1+C1)*D**3/6)/Math.cos(phi1);
-  return [lat*180/Math.PI, lon*180/Math.PI];
+function wireDrop(zone, input, handler) {
+  zone.addEventListener('dragover',  e => { e.preventDefault(); zone.classList.add('over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault(); zone.classList.remove('over');
+    const f = e.dataTransfer.files[0];
+    if (f) handler(f);
+  });
+  input.addEventListener('change', e => { if (e.target.files[0]) handler(e.target.files[0]); });
 }
 
-// ── Bootstrap ─────────────────────────────────────────────────────────────────
-window.addEventListener('load', () => {
-  const params = new URLSearchParams(location.search);
-  if (params.get('model')) loadURL(params.get('model'));
+wireDrop(document.getElementById('dz-geo'), document.getElementById('fi-geo'),
+  f => loadGeoJSON(f));
+wireDrop(document.getElementById('dz-glb'), document.getElementById('fi-glb'),
+  f => loadGLB(f));
 
-  const dz = document.getElementById('dropzone');
-  dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('over'); });
-  dz.addEventListener('dragleave', () => dz.classList.remove('over'));
-  dz.addEventListener('drop', e => {
-    e.preventDefault(); dz.classList.remove('over');
-    const f = e.dataTransfer.files[0];
-    if (f && f.name.endsWith('.glb')) loadFile(f);
-  });
-  document.getElementById('fileInput').addEventListener('change', e => {
-    if (e.target.files[0]) loadFile(e.target.files[0]);
-  });
+// Also handle window-level drag for both
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('drop', e => {
+  e.preventDefault();
+  const f = e.dataTransfer.files[0];
+  if (!f) return;
+  if (f.name.endsWith('.geojson') || f.name.endsWith('.json')) loadGeoJSON(f);
+  else if (f.name.endsWith('.glb')) loadGLB(f);
 });
 
-// ── File loading ──────────────────────────────────────────────────────────────
-function loadFile(file) {
-  const url = URL.createObjectURL(file);
-  initEngine();
-  BABYLON.SceneLoader.ImportMeshAsync('', '', url, scene, null, '.glb')
-    .then(r => onLoaded(r, file.name));
-}
-function loadURL(url) {
-  const dir  = url.includes('/') ? url.substring(0, url.lastIndexOf('/')+1) : '';
-  const file = url.includes('/') ? url.substring(url.lastIndexOf('/')+1) : url;
-  initEngine();
-  BABYLON.SceneLoader.ImportMeshAsync('', dir, file, scene)
-    .then(r => onLoaded(r, file));
+// Query param ?model=file.geojson or ?model=file.glb
+window.addEventListener('load', () => {
+  const p = new URLSearchParams(location.search);
+  const m = p.get('model');
+  if (m) {
+    if (m.endsWith('.geojson') || m.endsWith('.json')) loadGeoJSONURL(m);
+    else if (m.endsWith('.glb')) loadGLBURL(m);
+  }
+});
+
+// ── Shared UI helpers ─────────────────────────────────────────────────────────
+
+function showUI(hintText, modeLabel, modeClass) {
+  document.getElementById('drop').style.display      = 'none';
+  document.getElementById('topbar').style.display    = 'flex';
+  document.getElementById('controls').style.display  = 'flex';
+  document.getElementById('hint-text').textContent   = hintText;
+  const mb = document.getElementById('mode-badge');
+  mb.textContent = modeLabel;
+  mb.className   = 'mode-badge ' + modeClass;
 }
 
-function initEngine() {
-  if (engine) return;
-  const canvas = document.getElementById('canvas');
+function closePanel() {
+  document.getElementById('panel').classList.remove('open');
+  tooltip.style.display = 'none';
+  if (hlMesh) { hlMesh.renderOverlay = false; hlMesh = null; }
+  if (mlMap)  mlMap.setFilter('buildings-select', ['==', 'buildingID', '']);
+}
 
-  engine = new BABYLON.Engine(canvas, true, {
-    preserveDrawingBuffer: true,
-    alpha: true,             // transparent background so map shows through
+function showPanel(title, ex) {
+  document.getElementById('p-name').textContent = title;
+  const u = (ex.usage || '').toLowerCase();
+  const cls = u.includes('res') ? 'res' : u.includes('ind') ? 'ind' : 'com';
+  const val = v => (v != null && v !== '-' && v !== '') ? v : '—';
+  const rows = [
+    ['Usage',            ex.usage ? `<span class="badge ${cls}">${ex.usage}</span>` : '—'],
+    ['Floors',           val(ex.floors)],
+    ['Height',           ex.heightM != null ? ex.heightM + ' m' : '—'],
+    ['Footprint',        ex.footprintAreaM2  != null ? ex.footprintAreaM2  + ' m²' : '—'],
+    ['Gross floor area', ex.grossFloorAreaM2 != null ? ex.grossFloorAreaM2 + ' m²' : '—'],
+    ['Roof type',        val(ex.roofType)],
+    ['Year built',       val(ex.yearBuilt)],
+    ['Valuation class',  val(ex.valuation)],
+  ];
+  document.getElementById('p-rows').innerHTML = rows
+    .map(([l,v]) => `<div class="row"><span class="label">${l}</span><span class="value">${v}</span></div>`)
+    .join('');
+  const link = document.getElementById('osm-link');
+  if (ex.osmID) {
+    link.href = `https://www.openstreetmap.org/way/${ex.osmID}`;
+    link.style.display = 'block';
+  } else {
+    link.style.display = 'none';
+  }
+  document.getElementById('panel').classList.add('open');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GEOGRAPHIC VIEWER — MapLibre GL (.geojson)
+// Buildings rendered at their real WGS84 coordinates → perfect basemap alignment
+// ═══════════════════════════════════════════════════════════════════════════════
+
+let mlMap = null;
+
+function loadGeoJSON(file) {
+  const reader = new FileReader();
+  reader.onload = e => startMapLibre(JSON.parse(e.target.result), file.name);
+  reader.readAsText(file);
+}
+function loadGeoJSONURL(url) {
+  fetch(url).then(r => r.json()).then(d => startMapLibre(d, url));
+}
+
+function startMapLibre(geojson, filename) {
+  document.getElementById('mapgl').style.display = 'block';
+
+  // Count buildings and find centre
+  const bldgs = geojson.features.filter(f => f.properties && f.properties.buildingID);
+  document.getElementById('stats').textContent = `${bldgs.length} buildings · ${filename}`;
+
+  showUI('Click a building for cadastral details  ·  Scroll = zoom  ·  Drag = pan  ·  Ctrl+drag = tilt',
+         '🗺 Geographic view', 'geo');
+
+  // Compute bounding box centre
+  let minLon=Infinity, maxLon=-Infinity, minLat=Infinity, maxLat=-Infinity;
+  bldgs.forEach(f => {
+    f.geometry.coordinates[0].forEach(([lon,lat]) => {
+      if (lon < minLon) minLon=lon; if (lon > maxLon) maxLon=lon;
+      if (lat < minLat) minLat=lat; if (lat > maxLat) maxLat=lat;
+    });
+  });
+  const cLon = (minLon+maxLon)/2, cLat = (minLat+maxLat)/2;
+
+  mlMap = new maplibregl.Map({
+    container: 'mapgl',
+    style: {
+      version: 8,
+      sources: {
+        osm: {
+          type: 'raster',
+          tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+          tileSize: 256,
+          attribution: '© <a href="https://openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        }
+      },
+      layers: [{ id: 'osm-tiles', type: 'raster', source: 'osm' }],
+    },
+    center: [cLon, cLat],
+    zoom: 17,
+    pitch: 50,
+    bearing: -10,
+    antialias: true,
   });
 
-  scene = new BABYLON.Scene(engine);
-  scene.clearColor = new BABYLON.Color4(0, 0, 0, 0);   // fully transparent
+  mlMap.on('load', () => {
+    // Add building source
+    mlMap.addSource('buildings', { type: 'geojson', data: geojson });
 
-  // ── Camera ────────────────────────────────────────────────────────────────
-  // ArcRotateCamera: alpha = horizontal spin, beta = elevation (0=top, π/2=side)
-  camera = new BABYLON.ArcRotateCamera('cam', -Math.PI/4, Math.PI/3.5, 200,
-                                        BABYLON.Vector3.Zero(), scene);
+    // Base fill (ground footprint)
+    mlMap.addLayer({
+      id: 'buildings-fill',
+      type: 'fill-extrusion',
+      source: 'buildings',
+      filter: ['has', 'heightM'],
+      paint: {
+        'fill-extrusion-color': ['coalesce', ['get', 'wallColor'], '#ccb894'],
+        'fill-extrusion-height': ['get', 'heightM'],
+        'fill-extrusion-base': 0,
+        'fill-extrusion-opacity': 0.88,
+      }
+    });
 
-  camera.lowerBetaLimit  = 0.05;                  // don't flip through zenith
-  camera.upperBetaLimit  = (Math.PI / 2) - 0.01;  // allow near-horizontal view
-  camera.lowerRadiusLimit = 5;
-  camera.upperRadiusLimit = 5000;
+    // Selection highlight layer (initially shows nothing)
+    mlMap.addLayer({
+      id: 'buildings-select',
+      type: 'fill-extrusion',
+      source: 'buildings',
+      filter: ['==', 'buildingID', ''],
+      paint: {
+        'fill-extrusion-color': '#63b3ed',
+        'fill-extrusion-height': ['get', 'heightM'],
+        'fill-extrusion-base': 0,
+        'fill-extrusion-opacity': 0.75,
+      }
+    });
 
-  // Equal angular sensitivity on both axes for balanced drag feel
-  camera.angularSensibilityX = 600;
-  camera.angularSensibilityY = 600;
-  camera.wheelDeltaPercentage = 0.02;
-  camera.inertia = 0.4;     // snappier than default 0.9
-  camera.panningSensibility = 80;
+    // Road lines
+    mlMap.addLayer({
+      id: 'roads-line',
+      type: 'line',
+      source: 'buildings',
+      filter: ['==', ['get', 'featureType'], 'road'],
+      paint: {
+        'line-color': '#4a5568',
+        'line-width': ['interpolate', ['linear'], ['zoom'],
+          14, ['*', ['get', 'widthM'], 0.3],
+          18, ['*', ['get', 'widthM'], 1.5]
+        ],
+        'line-opacity': 0.8,
+      }
+    });
 
-  camera.attachControl(canvas, true);
+    // Park fills
+    mlMap.addLayer({
+      id: 'parks-fill',
+      type: 'fill',
+      source: 'buildings',
+      filter: ['==', ['get', 'featureType'], 'park'],
+      paint: {
+        'fill-color': '#276749',
+        'fill-opacity': 0.35,
+      }
+    });
 
-  // ── Lights ────────────────────────────────────────────────────────────────
-  const hemi = new BABYLON.HemisphericLight('h', new BABYLON.Vector3(0,1,0), scene);
+    // Click to inspect
+    mlMap.on('click', 'buildings-fill', e => {
+      const props = e.features[0].properties;
+      mlMap.setFilter('buildings-select', ['==', 'buildingID', props.buildingID]);
+      const title = props.osmID
+        ? `Building OSM #${props.osmID}`
+        : `Building ${props.buildingID.substring(0,8)}`;
+      showPanel(title, props);
+    });
+
+    // Click on empty space → deselect
+    mlMap.on('click', e => {
+      const fs = mlMap.queryRenderedFeatures(e.point, { layers: ['buildings-fill'] });
+      if (!fs.length) closePanel();
+    });
+
+    // Hover cursor
+    mlMap.on('mouseenter', 'buildings-fill', () => { mlMap.getCanvas().style.cursor = 'pointer'; });
+    mlMap.on('mouseleave', 'buildings-fill', () => { mlMap.getCanvas().style.cursor = ''; });
+  });
+
+  // Controls
+  document.getElementById('controls').innerHTML = `
+    <button class="ctrl-btn" onclick="mlMap && mlMap.flyTo({zoom:17,pitch:50,bearing:-10})">⟳ Reset view</button>
+    <button class="ctrl-btn" onclick="mlMap && mlMap.setPitch(0)">🗺 Top-down</button>
+  `;
+
+  mlMap.addControl(new maplibregl.NavigationControl(), 'bottom-left');
+  mlMap.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-left');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 3D MODEL VIEWER — Babylon.js (.glb)
+// Full shaped roofs, windows, doors. For game creators and detailed inspection.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+let engine = null, bScene = null, bCamera = null, hlMesh = null, wireMode = false;
+
+function loadGLB(file) {
+  const url = URL.createObjectURL(file);
+  initBabylon();
+  BABYLON.SceneLoader.ImportMeshAsync('', '', url, bScene, null, '.glb')
+    .then(r => onGLBLoaded(r, file.name));
+}
+function loadGLBURL(url) {
+  const dir  = url.includes('/') ? url.substring(0, url.lastIndexOf('/')+1) : '';
+  const file = url.includes('/') ? url.substring(url.lastIndexOf('/')+1) : url;
+  initBabylon();
+  BABYLON.SceneLoader.ImportMeshAsync('', dir, file, bScene)
+    .then(r => onGLBLoaded(r, file));
+}
+
+function initBabylon() {
+  if (engine) return;
+  const canvas = document.getElementById('canvas');
+  canvas.style.display = 'block';
+
+  engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true, alpha: true });
+  bScene = new BABYLON.Scene(engine);
+  bScene.clearColor = new BABYLON.Color4(0.06, 0.07, 0.09, 1);
+
+  bCamera = new BABYLON.ArcRotateCamera('cam', -Math.PI/4, Math.PI/3.5, 200,
+                                         BABYLON.Vector3.Zero(), bScene);
+  bCamera.lowerBetaLimit      = 0.05;
+  bCamera.upperBetaLimit      = Math.PI/2 - 0.01;
+  bCamera.lowerRadiusLimit    = 5;
+  bCamera.upperRadiusLimit    = 5000;
+  bCamera.angularSensibilityX = 600;
+  bCamera.angularSensibilityY = 600;
+  bCamera.wheelDeltaPercentage = 0.02;
+  bCamera.inertia             = 0.4;
+  bCamera.panningSensibility  = 80;
+  bCamera.attachControl(canvas, true);
+
+  const hemi = new BABYLON.HemisphericLight('h', new BABYLON.Vector3(0,1,0), bScene);
   hemi.intensity = 0.65; hemi.groundColor = new BABYLON.Color3(0.3,0.3,0.3);
-  const sun = new BABYLON.DirectionalLight('sun', new BABYLON.Vector3(-1,-1.5,-0.5), scene);
+  const sun = new BABYLON.DirectionalLight('sun', new BABYLON.Vector3(-1,-1.5,-0.5), bScene);
   sun.intensity = 0.85;
 
-  engine.runRenderLoop(() => scene && scene.render());
-  window.addEventListener('resize', () => { engine.resize(); leafletMap.invalidateSize(); });
+  engine.runRenderLoop(() => bScene && bScene.render());
+  window.addEventListener('resize', () => engine.resize());
 
-  setupInteraction();
+  setupBabylonInteraction(canvas);
 }
 
-function onLoaded(result, filename) {
-  document.getElementById('drop').style.display    = 'none';
-  document.getElementById('topbar').style.display  = 'flex';
-  document.getElementById('controls').style.display = 'flex';
-
+function onGLBLoaded(result, filename) {
   const bldgs = result.meshes.filter(m => m.name.startsWith('building_'));
-  document.getElementById('stats').textContent =
-    `${bldgs.length} buildings · ${filename}`;
+  document.getElementById('stats').textContent = `${bldgs.length} buildings · ${filename}`;
 
-  // Frame camera on scene
-  const bounds = scene.getWorldExtends();
+  showUI('Click building for details  ·  Scroll = zoom  ·  Drag = rotate  ·  Right-drag = pan',
+         '🏗 3D model view', 'model');
+
+  // Frame camera
+  const bounds = bScene.getWorldExtends();
   const centre = bounds.min.add(bounds.max).scale(0.5);
-  const size   = bounds.max.subtract(bounds.min).length();
-  camera.target = centre;
-  camera.radius = size * 0.8;
-  camera.alpha  = -Math.PI / 4;
-  camera.beta   = Math.PI / 3.5;
+  bCamera.target = centre;
+  bCamera.radius = bounds.max.subtract(bounds.min).length() * 0.8;
+  bCamera.alpha  = -Math.PI/4;
+  bCamera.beta   = Math.PI/3.5;
 
-  // Centre the Leaflet basemap using the UTM offset stored in environment node
-  const envNode = scene.getTransformNodeByName('environment');
-  const envEx   = envNode?.metadata?.gltf?.extras;
-  if (envEx?.utmOffsetE && envEx?.utmOffsetN) {
-    try {
-      // The offset is the SW corner of the city; shift to approximate centre
-      const citySize = size * 0.5;   // rough half-width in metres
-      const [lat, lon] = utm37s_to_latlon(
-        envEx.utmOffsetE + citySize,
-        envEx.utmOffsetN + citySize
-      );
-      if (lat > -90 && lat < 90 && lon > -180 && lon < 180) {
-        leafletMap.setView([lat, lon], 17);
-      }
-    } catch(e) { /* leave map at default Kenya view */ }
-  }
+  document.getElementById('controls').innerHTML = `
+    <button class="ctrl-btn" onclick="resetBabylonCamera()">⟳ Reset view</button>
+    <button class="ctrl-btn" onclick="toggleWireframe()">⬜ Wireframe</button>
+  `;
 }
 
-// ── Interaction ───────────────────────────────────────────────────────────────
-
-// Walk up the parent chain to find the glTF node that carries extras.
-// Babylon.js creates child meshes named "nodeName_primitive0", "nodeName_primitive1"
-// whose parent TransformNode is where the glTF extras actually live.
 function nodeExtras(mesh) {
   let node = mesh;
   while (node) {
@@ -342,22 +503,18 @@ function isBuildingMesh(m) {
          (m.parent?.name && m.parent.name.startsWith('building_'));
 }
 
-function setupInteraction() {
-  scene.onPointerObservable.add(pointerInfo => {
-    const type = pointerInfo.type;
-    const evt  = pointerInfo.event;
+function setupBabylonInteraction(canvas) {
+  bScene.onPointerObservable.add(pi => {
+    const type = pi.type;
+    const evt  = pi.event;
 
-    // Hover tooltip
     if (type === BABYLON.PointerEventTypes.POINTERMOVE) {
-      const pick = scene.pick(scene.pointerX, scene.pointerY, isBuildingMesh);
+      const pick = bScene.pick(bScene.pointerX, bScene.pointerY, isBuildingMesh);
       if (pick.hit && pick.pickedMesh) {
         const { extras } = nodeExtras(pick.pickedMesh);
-        const label = extras?.name
-                    ? extras.name
-                    : extras?.osmID
-                    ? `OSM #${extras.osmID}`
-                    : pick.pickedMesh.parent?.name?.replace('building_', 'Building ') ||
-                      pick.pickedMesh.name.replace(/_primitive\d+$/, '').replace('building_', 'Building ');
+        const label = extras?.name || (extras?.osmID ? `OSM #${extras.osmID}`
+          : (pick.pickedMesh.parent?.name || pick.pickedMesh.name)
+              .replace(/_primitive\d+$/, '').replace('building_', 'Building '));
         tooltip.style.display = 'block';
         tooltip.style.left = (evt.clientX + 14) + 'px';
         tooltip.style.top  = (evt.clientY - 6)  + 'px';
@@ -367,11 +524,19 @@ function setupInteraction() {
       }
     }
 
-    // Click — left button only
     if (type === BABYLON.PointerEventTypes.POINTERDOWN && evt.button === 0) {
-      const pick = scene.pick(scene.pointerX, scene.pointerY, isBuildingMesh);
+      const pick = bScene.pick(bScene.pointerX, bScene.pointerY, isBuildingMesh);
       if (pick.hit && pick.pickedMesh) {
-        selectBuilding(pick.pickedMesh);
+        if (hlMesh && hlMesh !== pick.pickedMesh) hlMesh.renderOverlay = false;
+        hlMesh = pick.pickedMesh;
+        hlMesh.renderOverlay = true;
+        hlMesh.overlayColor  = new BABYLON.Color3(0.4, 0.7, 1.0);
+        hlMesh.overlayAlpha  = 0.3;
+        const { extras } = nodeExtras(pick.pickedMesh);
+        const name = extras?.name || (extras?.osmID ? `Building OSM #${extras.osmID}`
+          : (pick.pickedMesh.parent?.name || pick.pickedMesh.name)
+              .replace(/_primitive\d+$/, '').replace('building_', 'Building '));
+        showPanel(name, extras || {});
       } else {
         closePanel();
       }
@@ -379,88 +544,19 @@ function setupInteraction() {
   });
 }
 
-function selectBuilding(mesh) {
-  if (highlighted && highlighted !== mesh) {
-    highlighted.renderOverlay = false;
-  }
-  highlighted = mesh;
-  mesh.renderOverlay = true;
-  mesh.overlayColor  = new BABYLON.Color3(0.4, 0.7, 1.0);
-  mesh.overlayAlpha  = 0.3;
-
-  const { extras } = nodeExtras(mesh);
-  const displayName = extras?.name
-    ? extras.name
-    : extras?.osmID
-    ? `Building OSM #${extras.osmID}`
-    : (mesh.parent?.name || mesh.name).replace(/_primitive\d+$/, '').replace('building_', 'Building ');
-
-  showPanel(displayName, extras || {});
-}
-
-function closePanel() {
-  document.getElementById('panel').classList.remove('open');
-  if (highlighted) { highlighted.renderOverlay = false; highlighted = null; }
-  tooltip.style.display = 'none';
-}
-
-function showPanel(title, ex) {
-  document.getElementById('p-name').textContent = title;
-
-  const usageClass = (ex.usage||'').toLowerCase().includes('res') ? 'res'
-                   : (ex.usage||'').toLowerCase().includes('ind') ? 'ind' : 'com';
-
-  const val = v => (v != null && v !== '-' && v !== '') ? v : '—';
-
-  const rows = [
-    ['Usage',            ex.usage  ? `<span class="badge ${usageClass}">${ex.usage}</span>` : '—'],
-    ['Floors',           val(ex.floors)],
-    ['Height',           ex.heightM          != null ? ex.heightM + ' m'   : '—'],
-    ['Footprint',        ex.footprintAreaM2  != null ? ex.footprintAreaM2  + ' m²' : '—'],
-    ['Gross Floor Area', ex.grossFloorAreaM2 != null ? ex.grossFloorAreaM2 + ' m²' : '—'],
-    ['Roof type',        val(ex.roofType)],
-    ['Year built',       val(ex.yearBuilt)],
-    ['Valuation class',  val(ex.valuation)],
-  ];
-
-  document.getElementById('p-rows').innerHTML = rows.map(([l, v]) =>
-    `<div class="row"><span class="label">${l}</span><span class="value">${v}</span></div>`
-  ).join('');
-
-  const link = document.getElementById('osm-link');
-  if (ex.osmID) {
-    link.href = `https://www.openstreetmap.org/way/${ex.osmID}`;
-    link.style.display = 'block';
-  } else {
-    link.style.display = 'none';
-  }
-
-  document.getElementById('panel').classList.add('open');
-}
-
-// ── Controls ──────────────────────────────────────────────────────────────────
-function resetCamera() {
-  if (!scene) return;
-  const bounds = scene.getWorldExtends();
-  camera.target = bounds.min.add(bounds.max).scale(0.5);
-  camera.radius = bounds.max.subtract(bounds.min).length() * 0.8;
-  camera.alpha  = -Math.PI / 4;
-  camera.beta   = Math.PI / 3.5;
+function resetBabylonCamera() {
+  if (!bScene) return;
+  const bounds = bScene.getWorldExtends();
+  bCamera.target = bounds.min.add(bounds.max).scale(0.5);
+  bCamera.radius = bounds.max.subtract(bounds.min).length() * 0.8;
+  bCamera.alpha  = -Math.PI/4;
+  bCamera.beta   = Math.PI/3.5;
 }
 
 function toggleWireframe() {
-  if (!scene) return;
+  if (!bScene) return;
   wireMode = !wireMode;
-  scene.meshes.forEach(m => { if (m.material) m.material.wireframe = wireMode; });
-}
-
-function toggleMap() {
-  mapVisible = !mapVisible;
-  document.getElementById('map').style.display = mapVisible ? '' : 'none';
-  if (!scene) return;
-  scene.clearColor = mapVisible
-    ? new BABYLON.Color4(0, 0, 0, 0)
-    : new BABYLON.Color4(0.06, 0.07, 0.09, 1);
+  bScene.meshes.forEach(m => { if (m.material) m.material.wireframe = wireMode; });
 }
 </script>
 </body>

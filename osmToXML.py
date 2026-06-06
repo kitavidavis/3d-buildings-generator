@@ -334,8 +334,15 @@ def main():
         rtype   = _tag_roof(tags)
         usage   = _tag_usage(tags)
         bid     = str(uuid.uuid4())
-        building_to_xml(root, bldg, ox, oy, 0.0, xs, ys, zs,
-                        floors, floor_h, rtype, usage, bid)
+        b_el    = building_to_xml(root, bldg, ox, oy, 0.0, xs, ys, zs,
+                                  floors, floor_h, rtype, usage, bid)
+
+        # Store the actual polygon nodes in UTM so exportToGeoJSON.py can
+        # reconstruct the real building footprint (not just the bounding box).
+        utm_pts = [latlon_to_utm37s(lat, lon) for lat, lon in bldg["nodes"][:-1]]
+        poly_el = etree.SubElement(b_el, "utmPolygon")
+        poly_el.text = " ".join(f"{e:.2f} {n:.2f}" for e, n in utm_pts)
+
         count += 1
 
     # ── Roads ────────────────────────────────────────────────────────────────
