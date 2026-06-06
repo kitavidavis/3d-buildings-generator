@@ -28,7 +28,10 @@ PARSER = argparse.ArgumentParser(description= '3D Cadastre - Generate Buildings'
 PARSER.add_argument('-n', '--number', help="Number of buildings to generate.", required=False)
 PARSER.add_argument('-o', '--filename', help="Filename to be written containing the data of the buildings (XML).", required=False)
 PARSER.add_argument('-r', '--rotation', help='Enable rotation. Default state is False. Allowed options: 0/1 or False/True.', required=False)
-PARSER.add_argument('-c', '--crs', help='Origin of the reference system.', required=False)
+PARSER.add_argument('-c', '--crs',
+    help='Kenyan city origin for EPSG:21037 coordinates. '
+         'Options: Nairobi, Mombasa, Kisumu, Nakuru, Eldoret, Thika, Nyeri, Malindi.',
+    required=False)
 PARSER.add_argument('-s', '--street', help='Generate a road network.', required=False)
 PARSER.add_argument('-v', '--vegetation', help='Generate vegetation.', required=False)
 PARSER.add_argument('-p', '--parts', help='Generate parts of buildings, such as garages.', required=False)
@@ -791,16 +794,27 @@ def randomwindow(side, fl, xs, ys, zs, floorHeight, fixed=None):
     else:
         raise ValueError("Not supported at the moment")
 
+# Kenyan city origins in EPSG:21037 (Arc 1960 / UTM Zone 37S)
+# Eastings and northings approximate city centre coordinates.
+KENYA_ORIGINS = {
+    'Nairobi':  (257000.0, 9855000.0),  # CBD, Upper Hill area
+    'Mombasa':  (530500.0, 9618000.0),  # Mombasa Island
+    'Kisumu':   (194500.0, 9974000.0),  # Kisumu CBD
+    'Nakuru':   (198000.0, 9974000.0),  # Nakuru town centre  (zone 36S crossover — approx)
+    'Eldoret':  (175000.0, 9988000.0),  # Eldoret CBD
+    'Thika':    (274000.0, 9880000.0),  # Thika town
+    'Nyeri':    (267000.0, 9924000.0),  # Nyeri town
+    'Malindi':  (567000.0, 9695000.0),  # Malindi town
+}
+
 def arranger(i, n, crs = None):
     """Arranges the location of each building."""
     if crs is not None:
-        if crs == 'Nordoostpolder':
-            shiftx = 173469.0
-            shifty = 526427.0
+        if crs in KENYA_ORIGINS:
+            shiftx, shifty = KENYA_ORIGINS[crs]
         else:
-            shiftx = 0.0
-            shifty = 0.0
-
+            known = ', '.join(KENYA_ORIGINS.keys())
+            raise ValueError(f"Unknown CRS '{crs}'. Kenyan cities supported: {known}")
     else:
         shiftx = 0.0
         shifty = 0.0

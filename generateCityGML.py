@@ -9,7 +9,7 @@ import math
 import uuid
 import copy
 
-PARSER = argparse.ArgumentParser(description='Generator of CityGML files according to the XML of buildings.')
+PARSER = argparse.ArgumentParser(description='3D Cadastre Kenya — Generate CityGML from building XML spec.')
 PARSER.add_argument('-i', '--filename',
     help='XML file to read', required=True)
 PARSER.add_argument('-o', '--directory',
@@ -102,7 +102,7 @@ def createCityGML(suffix):
     citymodelname.text = str(suffix)
     boundedBy = etree.SubElement(CityModel, "{%s}boundedBy" % ns_gml)
     Envelope = etree.SubElement(boundedBy, "{%s}Envelope" % ns_gml, srsDimension="3")
-    Envelope.attrib["srsName"] = "EPSG:28992"
+    Envelope.attrib["srsName"] = "EPSG:21037"  # Arc 1960 / UTM Zone 37S (Kenya)
     lowercorner = etree.SubElement(Envelope, "{%s}lowerCorner" % ns_gml)
     lowercorner.text = '0 0 0'
     uppercorner = etree.SubElement(Envelope, "{%s}upperCorner" % ns_gml)
