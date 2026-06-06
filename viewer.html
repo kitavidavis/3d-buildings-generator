@@ -230,31 +230,37 @@ function onLoaded(result, filename) {
 // ── Interaction ───────────────────────────────────────────────────────────────
 
 function setupInteraction() {
-  const canvas = document.getElementById('canvas');
+  scene.onPointerObservable.add(pointerInfo => {
+    const type = pointerInfo.type;
+    const evt  = pointerInfo.event;
 
-  // Hover
-  scene.onPointerMoveObservable.add(evt => {
-    const pick = scene.pick(scene.pointerX, scene.pointerY, m => m.name.startsWith('building_'));
-    if (pick.hit && pick.pickedMesh) {
-      const ex = pick.pickedMesh.metadata?.gltf?.extras;
-      const label = ex?.name || ex?.osmID ? `OSM #${ex.osmID}` : pick.pickedMesh.name;
-      tooltip.style.display = 'block';
-      tooltip.style.left = (evt.clientX + 14) + 'px';
-      tooltip.style.top  = (evt.clientY - 6)  + 'px';
-      tooltip.textContent = label;
-    } else {
-      tooltip.style.display = 'none';
+    // Hover
+    if (type === BABYLON.PointerEventTypes.POINTERMOVE) {
+      const pick = scene.pick(scene.pointerX, scene.pointerY,
+                              m => m.name.startsWith('building_'));
+      if (pick.hit && pick.pickedMesh) {
+        const ex = pick.pickedMesh.metadata?.gltf?.extras;
+        const label = ex?.name ? ex.name
+                    : ex?.osmID ? `OSM #${ex.osmID}`
+                    : pick.pickedMesh.name.replace('building_', 'Building ');
+        tooltip.style.display = 'block';
+        tooltip.style.left = (evt.clientX + 14) + 'px';
+        tooltip.style.top  = (evt.clientY - 6)  + 'px';
+        tooltip.textContent = label;
+      } else {
+        tooltip.style.display = 'none';
+      }
     }
-  });
 
-  // Click
-  scene.onPointerDownObservable.add(info => {
-    if (info.event.button !== 0) return;
-    const pick = scene.pick(scene.pointerX, scene.pointerY, m => m.name.startsWith('building_'));
-    if (pick.hit && pick.pickedMesh) {
-      selectBuilding(pick.pickedMesh);
-    } else {
-      closePanel();
+    // Click (left button only)
+    if (type === BABYLON.PointerEventTypes.POINTERDOWN && evt.button === 0) {
+      const pick = scene.pick(scene.pointerX, scene.pointerY,
+                              m => m.name.startsWith('building_'));
+      if (pick.hit && pick.pickedMesh) {
+        selectBuilding(pick.pickedMesh);
+      } else {
+        closePanel();
+      }
     }
   });
 }
