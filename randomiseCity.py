@@ -113,10 +113,10 @@ def buildingParameters(specifications, i, n, crs = None):
         angle.text = '0'
 
     #-- Randomise dimensions of the building body (width, length) in metres
-    xs = round(random.uniform(3, 10), 2)
-    ys = round(random.uniform(3, 10), 2)
+    xs = round(random.uniform(3, 14), 2)
+    ys = round(random.uniform(3, 14), 2)
     #-- Randomise the number of storeys and their height
-    floors = random.randint(1, 5)
+    floors = random.randint(1, 20)
     floorHeight = round(random.uniform(3.0, 3.5), 2)
     #-- The height is derived from the number of storeys and their height
     zs = float(round(floors * floorHeight, 2))

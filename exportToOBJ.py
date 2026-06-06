@@ -1,406 +1,447 @@
 """
 Export 3D buildings from the XML spec to Wavefront OBJ + MTL.
-Reads the same BuildingInformation.xml produced by randomiseCity.py and
-generates geometry that can be imported directly into Unity, Unreal Engine,
-Blender, and any other DCC tool.
+
+Improvements in this version:
+  - UV texture coordinates on all faces (tile every 2.5 m so brick/roof
+    textures tile naturally at any scale)
+  - Per-building colour variation (30 wall × roof combos from a curated palette)
+  - Road network as individual crossing strips with sidewalks and lane markings
+  - Grass ground plane beneath the city
+  - Supports taller buildings (up to 20 floors via randomiseCity.py)
 
 Usage:
-    python exportToOBJ.py -i BuildingInformation.xml -o city.obj
-    python exportToOBJ.py -i BuildingInformation.xml -o city.obj --lod 2
-    python exportToOBJ.py -i BuildingInformation.xml -o city.obj --split
-
-LOD levels:
-    0  -- footprint polygon only (2D outline extruded flat)
-    1  -- simple block (box with flat top, no roof detail)
-    2  -- block + roof shape (Flat/Shed/Gabled/Hipped/Pyramidal)  [default]
-    3  -- LOD2 + doors and wall windows as inset quads
-
---split  writes one .obj per building instead of a single combined file.
+    python exportToOBJ.py -i city.xml -o city.obj
+    python exportToOBJ.py -i city.xml -o city.obj --lod 3    # doors + windows
+    python exportToOBJ.py -i city.xml -o buildings/ --split  # one .obj per building
 """
 
-import argparse
-import math
-import os
-import sys
+import argparse, math, os
 from lxml import etree
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
+# ── CLI ──────────────────────────────────────────────────────────────────────
 
-PARSER = argparse.ArgumentParser(description="Export buildings XML → OBJ for game engines")
-PARSER.add_argument("-i", "--input",  required=True,  help="Input XML file (BuildingInformation.xml)")
-PARSER.add_argument("-o", "--output", required=True,  help="Output .obj file (or directory when --split)")
-PARSER.add_argument("--lod",   type=int, default=2, choices=[0, 1, 2, 3],
-                    help="Level of detail: 0=footprint, 1=block, 2=roof, 3=openings (default: 2)")
+PARSER = argparse.ArgumentParser(description="Export buildings XML → OBJ")
+PARSER.add_argument("-i", "--input",  required=True)
+PARSER.add_argument("-o", "--output", required=True)
+PARSER.add_argument("--lod", type=int, default=2, choices=[0, 1, 2, 3],
+                    help="0=footprint 1=block 2=roof(default) 3=openings")
 PARSER.add_argument("--split", action="store_true",
-                    help="Write one .obj per building rather than a single combined file")
+                    help="Write one .obj per building")
 ARGS = PARSER.parse_args()
 
+# ── Colour palettes ──────────────────────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# Material library
-# ---------------------------------------------------------------------------
+UV_TILE = 2.5   # metres per UV unit
 
-MATERIALS = {
-    "Wall":     {"Kd": (0.80, 0.75, 0.68)},
-    "Roof":     {"Kd": (0.55, 0.22, 0.18)},
-    "Floor":    {"Kd": (0.60, 0.58, 0.55)},
-    "Door":     {"Kd": (0.35, 0.22, 0.12)},
-    "Window":   {"Kd": (0.55, 0.75, 0.90), "d": 0.6},
-    "Road":     {"Kd": (0.25, 0.25, 0.25)},
-    "Park":     {"Kd": (0.25, 0.60, 0.25)},
-}
+WALL_PALETTE = [
+    (0.93, 0.89, 0.82),  # warm cream
+    (0.82, 0.82, 0.80),  # cool grey
+    (0.80, 0.72, 0.58),  # tan
+    (0.88, 0.82, 0.68),  # light ochre
+    (0.95, 0.93, 0.89),  # off-white
+    (0.70, 0.72, 0.75),  # slate grey
+]
+ROOF_PALETTE = [
+    (0.62, 0.22, 0.15),  # terracotta
+    (0.30, 0.32, 0.35),  # dark slate
+    (0.28, 0.48, 0.28),  # forest green
+    (0.55, 0.28, 0.12),  # rust brown
+    (0.20, 0.20, 0.22),  # charcoal
+]
 
+def building_mats(bid):
+    """Return (wall_mat_name, roof_mat_name) for a building UUID."""
+    h = sum(ord(c) * (i + 1) for i, c in enumerate(bid[:16]))
+    return f"Wall_{h % len(WALL_PALETTE)}", f"Roof_{(h // 7) % len(ROOF_PALETTE)}"
 
-def write_mtl(path):
+def build_material_table():
+    mats = {}
+    for i, c in enumerate(WALL_PALETTE):
+        mats[f"Wall_{i}"] = {"Kd": c, "Ka": (0.10,0.10,0.10), "Ks": (0.05,0.05,0.05), "Ns": 10}
+    for i, c in enumerate(ROOF_PALETTE):
+        mats[f"Roof_{i}"] = {"Kd": c, "Ka": (0.10,0.10,0.10), "Ks": (0.08,0.08,0.08), "Ns": 18}
+    mats["Floor"]    = {"Kd": (0.55, 0.53, 0.50)}
+    mats["Door"]     = {"Kd": (0.35, 0.22, 0.12), "Ks": (0.10,0.08,0.05), "Ns": 25}
+    mats["Window"]   = {"Kd": (0.55, 0.75, 0.90), "d": 0.55, "Ks": (0.30,0.35,0.40), "Ns": 60}
+    mats["Road"]     = {"Kd": (0.38, 0.38, 0.40)}
+    mats["Sidewalk"] = {"Kd": (0.72, 0.70, 0.67)}
+    mats["Marking"]  = {"Kd": (0.92, 0.92, 0.88)}
+    mats["Ground"]   = {"Kd": (0.28, 0.45, 0.22)}
+    mats["Park"]     = {"Kd": (0.28, 0.62, 0.26)}
+    return mats
+
+def write_mtl(path, mats):
     with open(path, "w") as f:
-        for name, props in MATERIALS.items():
+        for name, props in mats.items():
             f.write(f"newmtl {name}\n")
-            r, g, b = props["Kd"]
+            r, g, b = props.get("Kd", (0.8, 0.8, 0.8))
             f.write(f"Kd {r:.3f} {g:.3f} {b:.3f}\n")
-            f.write(f"Ka 0.100 0.100 0.100\n")
-            f.write(f"Ks 0.050 0.050 0.050\n")
-            f.write(f"Ns 10.0\n")
+            ka = props.get("Ka", (0.10, 0.10, 0.10))
+            f.write(f"Ka {ka[0]:.3f} {ka[1]:.3f} {ka[2]:.3f}\n")
+            ks = props.get("Ks", (0.02, 0.02, 0.02))
+            f.write(f"Ks {ks[0]:.3f} {ks[1]:.3f} {ks[2]:.3f}\n")
+            f.write(f"Ns {props.get('Ns', 10):.1f}\n")
             if "d" in props:
-                f.write(f"d {props['d']}\n")
+                f.write(f"d {props['d']:.2f}\n")
             f.write("\n")
 
-
-# ---------------------------------------------------------------------------
-# OBJ builder – accumulates vertices and faces
-# ---------------------------------------------------------------------------
+# ── OBJ builder ──────────────────────────────────────────────────────────────
 
 class OBJBuilder:
     def __init__(self):
-        self.vertices = []   # list of (x, y, z)
-        self.faces = []      # list of (mat_name, [v_indices 1-based])
-        self.groups = []     # list of (group_name, face_start_idx)
-        self._cur_group = None
+        self.verts = []   # (x, y, z)
+        self.uvs   = []   # (u, v)
+        self.faces = []   # (mat, [(v_idx, uv_idx), ...], group)
+        self._grp  = "default"
 
     def group(self, name):
-        self._cur_group = name
-        self.groups.append((name, len(self.faces)))
+        self._grp = name
 
-    def add_polygon(self, points, mat):
-        """points: list of (x,y,z). Returns face index."""
-        base = len(self.vertices) + 1
-        self.vertices.extend(points)
-        indices = list(range(base, base + len(points)))
-        self.faces.append((mat, indices, self._cur_group))
-        return len(self.faces) - 1
+    def poly(self, pts, uvcoords, mat):
+        vb  = len(self.verts)  + 1
+        uvb = len(self.uvs)    + 1
+        self.verts.extend(pts)
+        self.uvs.extend(uvcoords)
+        pairs = [(vb + i, uvb + i) for i in range(len(pts))]
+        self.faces.append((mat, pairs, self._grp))
 
     def write(self, obj_path, mtl_name):
         with open(obj_path, "w") as f:
-            f.write(f"# 3D Buildings Generator\n")
-            f.write(f"mtllib {mtl_name}\n\n")
-            for x, y, z in self.vertices:
+            f.write(f"# 3D Buildings Generator\nmtllib {mtl_name}\n\n")
+            for x, y, z in self.verts:
                 f.write(f"v {x:.4f} {y:.4f} {z:.4f}\n")
             f.write("\n")
-            current_mat = None
-            current_group = None
-            for mat, indices, grp in self.faces:
-                if grp != current_group:
+            for u, v in self.uvs:
+                f.write(f"vt {u:.4f} {v:.4f}\n")
+            f.write("\n")
+            cur_mat, cur_grp = None, None
+            for mat, pairs, grp in self.faces:
+                if grp != cur_grp:
                     f.write(f"g {grp}\n")
-                    current_group = grp
-                if mat != current_mat:
+                    cur_grp = grp
+                if mat != cur_mat:
                     f.write(f"usemtl {mat}\n")
-                    current_mat = mat
-                f.write("f " + " ".join(str(i) for i in indices) + "\n")
+                    cur_mat = mat
+                f.write("f " + " ".join(f"{v}/{u}" for v, u in pairs) + "\n")
 
+# ── UV helpers ───────────────────────────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# Geometry helpers
-# ---------------------------------------------------------------------------
+def _d(a, b):
+    return math.sqrt(sum((a[i]-b[i])**2 for i in range(3)))
 
-def rect_face(ox, oy, oz, dx, dy, dz, close=True):
-    """Four corners of an axis-aligned quad given origin + two edge deltas."""
-    pts = [
-        (ox,      oy,      oz),
-        (ox+dx,   oy+dy,   oz),
-        (ox+dx+dz[0], oy+dy+dz[1], oz+dz[2]),
-        (ox+dz[0],    oy+dz[1],    oz+dz[2]),
-    ]
-    return pts
+def wall_uv(length, height):
+    u1, v1 = length / UV_TILE, height / UV_TILE
+    return [(0, 0), (u1, 0), (u1, v1), (0, v1)]
 
+def flat_uv(xs, ys):
+    return [(0, 0), (xs/UV_TILE, 0), (xs/UV_TILE, ys/UV_TILE), (0, ys/UV_TILE)]
 
-def box_faces(ox, oy, oz, xs, ys, zs):
-    """All 6 faces of an axis-aligned box as lists of (x,y,z) quads.
-    Returns dict with keys: bottom, top, south, north, west, east."""
-    return {
-        "bottom": [(ox,    oy,    oz),    (ox+xs, oy,    oz),    (ox+xs, oy+ys, oz),    (ox,    oy+ys, oz)],
-        "top":    [(ox,    oy,    oz+zs), (ox,    oy+ys, oz+zs), (ox+xs, oy+ys, oz+zs), (ox+xs, oy,    oz+zs)],
-        "south":  [(ox,    oy,    oz),    (ox,    oy,    oz+zs), (ox+xs, oy,    oz+zs), (ox+xs, oy,    oz)],
-        "north":  [(ox+xs, oy+ys, oz),    (ox+xs, oy+ys, oz+zs), (ox,    oy+ys, oz+zs), (ox,    oy+ys, oz)],
-        "west":   [(ox,    oy+ys, oz),    (ox,    oy+ys, oz+zs), (ox,    oy,    oz+zs), (ox,    oy,    oz)],
-        "east":   [(ox+xs, oy,    oz),    (ox+xs, oy,    oz+zs), (ox+xs, oy+ys, oz+zs), (ox+xs, oy+ys, oz)],
-    }
+def tri_uv():
+    return [(0, 0), (1, 0), (0.5, 1)]
 
+def edge_uv(pts):
+    """Planar UV for a quad based on actual edge lengths."""
+    u1 = _d(pts[0], pts[1]) / UV_TILE
+    v1 = _d(pts[0], pts[-1]) / UV_TILE
+    return [(0, 0), (u1, 0), (u1, v1), (0, v1)]
 
-# ---------------------------------------------------------------------------
-# Roof generators  (return list of polygon point-lists)
-# ---------------------------------------------------------------------------
+# ── Building geometry ─────────────────────────────────────────────────────────
 
-def roof_flat(ox, oy, zs, xs, ys):
-    return [
-        [(ox, oy, zs), (ox+xs, oy, zs), (ox+xs, oy+ys, zs), (ox, oy+ys, zs)]
-    ]
+def add_box(builder, ox, oy, oz, xs, ys, zs, wall_mat, floor_mat):
+    """Box with UV coords on every face."""
+    builder.poly([(ox,oy,oz),(ox+xs,oy,oz),(ox+xs,oy+ys,oz),(ox,oy+ys,oz)],
+                 flat_uv(xs, ys), floor_mat)
+    # south (y=oy, runs +x)
+    builder.poly([(ox,oy,oz),(ox+xs,oy,oz),(ox+xs,oy,oz+zs),(ox,oy,oz+zs)],
+                 wall_uv(xs, zs), wall_mat)
+    # north (y=oy+ys, runs -x)
+    builder.poly([(ox+xs,oy+ys,oz),(ox,oy+ys,oz),(ox,oy+ys,oz+zs),(ox+xs,oy+ys,oz+zs)],
+                 wall_uv(xs, zs), wall_mat)
+    # west (x=ox, runs -y)
+    builder.poly([(ox,oy+ys,oz),(ox,oy,oz),(ox,oy,oz+zs),(ox,oy+ys,oz+zs)],
+                 wall_uv(ys, zs), wall_mat)
+    # east (x=ox+xs, runs +y)
+    builder.poly([(ox+xs,oy,oz),(ox+xs,oy+ys,oz),(ox+xs,oy+ys,oz+zs),(ox+xs,oy,oz+zs)],
+                 wall_uv(ys, zs), wall_mat)
 
+def add_roof(builder, ox, oy, zt, xs, ys, h, r, rtype, roof_mat):
+    """Shaped roof at height zt, ridge height h, hip-width r."""
+    if rtype == "Flat" or h == 0:
+        builder.poly([(ox,oy,zt),(ox+xs,oy,zt),(ox+xs,oy+ys,zt),(ox,oy+ys,zt)],
+                     flat_uv(xs, ys), roof_mat)
 
-def roof_shed(ox, oy, zs, xs, ys, h):
-    """Mono-pitch: west edge at zs+h, east edge at zs."""
-    return [
-        # roof face (quad)
-        [(ox,    oy,    zs+h), (ox+xs, oy,    zs),
-         (ox+xs, oy+ys, zs),   (ox,    oy+ys, zs+h)],
-        # west gable triangle
-        [(ox, oy, zs), (ox, oy, zs+h), (ox, oy+ys, zs+h), (ox, oy+ys, zs)],
-    ]
+    elif rtype == "Shed":
+        pts = [(ox,oy,zt+h),(ox+xs,oy,zt),(ox+xs,oy+ys,zt),(ox,oy+ys,zt+h)]
+        builder.poly(pts, edge_uv(pts), roof_mat)
+        builder.poly([(ox,oy,zt),(ox,oy,zt+h),(ox,oy+ys,zt+h),(ox,oy+ys,zt)],
+                     wall_uv(ys, h), roof_mat)
+        builder.poly([(ox+xs,oy+ys,zt),(ox+xs,oy,zt),(ox+xs,oy,zt),(ox+xs,oy+ys,zt)],
+                     wall_uv(ys, 0.01), roof_mat)
 
+    elif rtype == "Gabled":
+        rx = ox + xs * 0.5
+        # slopes
+        pts_e = [(ox+xs,oy,zt),(ox+xs,oy+ys,zt),(rx,oy+ys,zt+h),(rx,oy,zt+h)]
+        pts_w = [(ox,oy+ys,zt),(ox,oy,zt),(rx,oy,zt+h),(rx,oy+ys,zt+h)]
+        builder.poly(pts_e, edge_uv(pts_e), roof_mat)
+        builder.poly(pts_w, edge_uv(pts_w), roof_mat)
+        # gable triangles
+        builder.poly([(ox,oy,zt),(rx,oy,zt+h),(ox+xs,oy,zt)], tri_uv(), roof_mat)
+        builder.poly([(ox+xs,oy+ys,zt),(rx,oy+ys,zt+h),(ox,oy+ys,zt)], tri_uv(), roof_mat)
 
-def roof_gabled(ox, oy, zs, xs, ys, h):
-    ridge_x = ox + xs * 0.5
-    return [
-        # south slope
-        [(ox,      oy, zs),   (ox+xs, oy, zs),   (ridge_x, oy, zs+h)],
-        # north slope
-        [(ox+xs,   oy+ys, zs), (ox,   oy+ys, zs), (ridge_x, oy+ys, zs+h)],
-        # east slope
-        [(ox+xs, oy, zs),    (ox+xs, oy+ys, zs),  (ridge_x, oy+ys, zs+h), (ridge_x, oy, zs+h)],
-        # west slope
-        [(ox,    oy+ys, zs), (ox,    oy, zs),      (ridge_x, oy, zs+h),    (ridge_x, oy+ys, zs+h)],
-        # south gable
-        [(ox, oy, zs), (ridge_x, oy, zs+h), (ox+xs, oy, zs)],
-        # north gable
-        [(ox+xs, oy+ys, zs), (ridge_x, oy+ys, zs+h), (ox, oy+ys, zs)],
-    ]
+    elif rtype == "Hipped":
+        r = min(r, ys * 0.49)
+        rx = ox + xs * 0.5
+        ry0, ry1 = oy + r, oy + ys - r
+        # hip triangles
+        builder.poly([(ox,oy,zt),(ox+xs,oy,zt),(rx,ry0,zt+h)], tri_uv(), roof_mat)
+        builder.poly([(ox+xs,oy+ys,zt),(ox,oy+ys,zt),(rx,ry1,zt+h)], tri_uv(), roof_mat)
+        # slopes
+        pts_e = [(ox+xs,oy,zt),(ox+xs,oy+ys,zt),(rx,ry1,zt+h),(rx,ry0,zt+h)]
+        pts_w = [(ox,oy+ys,zt),(ox,oy,zt),(rx,ry0,zt+h),(rx,ry1,zt+h)]
+        builder.poly(pts_e, edge_uv(pts_e), roof_mat)
+        builder.poly(pts_w, edge_uv(pts_w), roof_mat)
 
+    elif rtype == "Pyramidal":
+        apex = (ox + xs*0.5, oy + ys*0.5, zt + h)
+        builder.poly([(ox,oy,zt),(ox+xs,oy,zt),apex], tri_uv(), roof_mat)
+        builder.poly([(ox+xs,oy,zt),(ox+xs,oy+ys,zt),apex], tri_uv(), roof_mat)
+        builder.poly([(ox+xs,oy+ys,zt),(ox,oy+ys,zt),apex], tri_uv(), roof_mat)
+        builder.poly([(ox,oy+ys,zt),(ox,oy,zt),apex], tri_uv(), roof_mat)
 
-def roof_hipped(ox, oy, zs, xs, ys, h, r):
-    """r = ridge half-width (distance from each end to ridge start)."""
-    r = min(r, ys * 0.49)
-    rx0 = ox + xs * 0.5
-    ry0 = oy + r
-    ry1 = oy + ys - r
-    return [
-        # south hip
-        [(ox, oy, zs),    (ox+xs, oy, zs),  (rx0, ry0, zs+h)],
-        # north hip
-        [(ox+xs, oy+ys, zs), (ox, oy+ys, zs), (rx0, ry1, zs+h)],
-        # east slope
-        [(ox+xs, oy, zs),    (ox+xs, oy+ys, zs), (rx0, ry1, zs+h), (rx0, ry0, zs+h)],
-        # west slope
-        [(ox,    oy+ys, zs), (ox,    oy, zs),    (rx0, ry0, zs+h), (rx0, ry1, zs+h)],
-    ]
-
-
-def roof_pyramidal(ox, oy, zs, xs, ys, h):
-    apex = (ox + xs * 0.5, oy + ys * 0.5, zs + h)
-    return [
-        [(ox,    oy,    zs), (ox+xs, oy,    zs), apex],
-        [(ox+xs, oy,    zs), (ox+xs, oy+ys, zs), apex],
-        [(ox+xs, oy+ys, zs), (ox,    oy+ys, zs), apex],
-        [(ox,    oy+ys, zs), (ox,    oy,    zs), apex],
-    ]
-
-
-# ---------------------------------------------------------------------------
-# Opening helpers (LOD 3)
-# ---------------------------------------------------------------------------
-
-def _wall_opening(ox, oy, oz, xs, ys, zs, wall, w_orig_x, w_orig_y, w_w, w_h):
-    """Return a quad for a door/window on the given wall face.
-    wall: 0=south (y=oy), 1=east (x=ox+xs), 2=north (y=oy+ys), 3=west (x=ox)
-    Origin along the wall is measured from the building's SW corner along that wall.
-    """
-    z0 = oz + w_orig_y
-    z1 = oz + w_orig_y + w_h
-    if wall == 0:   # south face, y=oy, runs along x
-        x0, x1 = ox + w_orig_x, ox + w_orig_x + w_w
-        return [(x0, oy, z0), (x1, oy, z0), (x1, oy, z1), (x0, oy, z1)]
-    elif wall == 1: # east face, x=ox+xs, runs along y
-        y0, y1 = oy + w_orig_x, oy + w_orig_x + w_w
-        return [(ox+xs, y0, z0), (ox+xs, y1, z0), (ox+xs, y1, z1), (ox+xs, y0, z1)]
-    elif wall == 2: # north face, y=oy+ys, runs along -x
-        x0, x1 = ox + xs - w_orig_x - w_w, ox + xs - w_orig_x
-        return [(x1, oy+ys, z0), (x0, oy+ys, z0), (x0, oy+ys, z1), (x1, oy+ys, z1)]
-    else:           # west face, x=ox, runs along -y
-        y0, y1 = oy + ys - w_orig_x - w_w, oy + ys - w_orig_x
-        return [(ox, y1, z0), (ox, y0, z0), (ox, y0, z1), (ox, y1, z1)]
-
-
-# ---------------------------------------------------------------------------
-# Per-building export
-# ---------------------------------------------------------------------------
+def _opening_pts(ox, oy, oz, xs, ys, wall, wx, wy, ww, wh):
+    z0, z1 = oz + wy, oz + wy + wh
+    if wall == 0:
+        x0, x1 = ox+wx, ox+wx+ww
+        return [(x0,oy,z0),(x1,oy,z0),(x1,oy,z1),(x0,oy,z1)]
+    elif wall == 1:
+        y0, y1 = oy+wx, oy+wx+ww
+        return [(ox+xs,y0,z0),(ox+xs,y1,z0),(ox+xs,y1,z1),(ox+xs,y0,z1)]
+    elif wall == 2:
+        x0, x1 = ox+xs-wx-ww, ox+xs-wx
+        return [(x1,oy+ys,z0),(x0,oy+ys,z0),(x0,oy+ys,z1),(x1,oy+ys,z1)]
+    else:
+        y0, y1 = oy+ys-wx-ww, oy+ys-wx
+        return [(ox,y1,z0),(ox,y0,z0),(ox,y0,z1),(ox,y1,z1)]
 
 def export_building(b, builder, lod):
-    bid = b.attrib.get("ID", "building")
-    builder.group(f"building_{bid[:8]}")
+    bid      = b.attrib.get("ID", "bldg")
+    wall_mat, roof_mat = building_mats(bid)
+    builder.group(f"b_{bid[:8]}")
 
     ox, oy, oz = [float(v) for v in b.findtext("origin").split()]
     xs = float(b.findtext("xSize"))
     ys = float(b.findtext("ySize"))
     zs = float(b.findtext("zSize"))
 
-    roof_el   = b.find("roof")
-    roof_type = roof_el.findtext("roofType") if roof_el is not None else "Flat"
-    h_el      = roof_el.find("h") if roof_el is not None else None
-    r_el      = roof_el.find("r") if roof_el is not None else None
+    roof_el = b.find("roof")
+    rtype   = roof_el.findtext("roofType") if roof_el is not None else "Flat"
+    h_el    = roof_el.find("h") if roof_el is not None else None
+    r_el    = roof_el.find("r") if roof_el is not None else None
     h = float(h_el.text) if h_el is not None else 0.0
     r = float(r_el.text) if r_el is not None else ys * 0.5
 
-    # LOD 0 – footprint only
     if lod == 0:
-        builder.add_polygon([(ox, oy, oz), (ox+xs, oy, oz),
-                              (ox+xs, oy+ys, oz), (ox, oy+ys, oz)], "Floor")
+        builder.poly([(ox,oy,oz),(ox+xs,oy,oz),(ox+xs,oy+ys,oz),(ox,oy+ys,oz)],
+                     flat_uv(xs, ys), "Floor")
         return
 
-    # LOD 1+ – box walls
-    faces = box_faces(ox, oy, oz, xs, ys, zs)
-    builder.add_polygon(faces["bottom"], "Floor")
-    for side in ("south", "north", "west", "east"):
-        builder.add_polygon(faces[side], "Wall")
+    add_box(builder, ox, oy, oz, xs, ys, zs, wall_mat, "Floor")
 
     if lod == 1:
-        builder.add_polygon(faces["top"], "Roof")
+        builder.poly([(ox,oy,oz+zs),(ox,oy+ys,oz+zs),(ox+xs,oy+ys,oz+zs),(ox+xs,oy,oz+zs)],
+                     flat_uv(xs, ys), roof_mat)
         return
 
-    # LOD 2+ – shaped roof
-    if roof_type == "Flat":
-        polys = roof_flat(ox, oy, oz+zs, xs, ys)
-    elif roof_type == "Shed":
-        polys = roof_shed(ox, oy, oz+zs, xs, ys, h)
-    elif roof_type == "Gabled":
-        polys = roof_gabled(ox, oy, oz+zs, xs, ys, h)
-    elif roof_type == "Hipped":
-        polys = roof_hipped(ox, oy, oz+zs, xs, ys, h, r)
-    elif roof_type == "Pyramidal":
-        polys = roof_pyramidal(ox, oy, oz+zs, xs, ys, h)
-    else:
-        polys = roof_flat(ox, oy, oz+zs, xs, ys)
-
-    for poly in polys:
-        builder.add_polygon(poly, "Roof")
+    add_roof(builder, ox, oy, oz + zs, xs, ys, h, r, rtype, roof_mat)
 
     if lod < 3:
         return
 
-    # LOD 3 – add door and windows as surface quads
     door_el = b.find("door")
     if door_el is not None:
-        wall  = int(door_el.findtext("wall"))
-        dox   = float(door_el.find("origin/x").text)
-        doy   = float(door_el.find("origin/y").text)
-        dw    = float(door_el.find("size/width").text)
-        dh    = float(door_el.find("size/height").text)
-        pts   = _wall_opening(ox, oy, oz, xs, ys, zs, wall, dox, doy, dw, dh)
-        builder.add_polygon(pts, "Door")
+        wall = int(door_el.findtext("wall"))
+        dox  = float(door_el.find("origin/x").text)
+        doy  = float(door_el.find("origin/y").text)
+        dw   = float(door_el.find("size/width").text)
+        dh   = float(door_el.find("size/height").text)
+        pts  = _opening_pts(ox, oy, oz, xs, ys, wall, dox, doy, dw, dh)
+        builder.poly(pts, wall_uv(dw, dh), "Door")
 
-    windows_el = b.find("windows")
-    if windows_el is not None:
-        for win in windows_el.findall("window"):
-            wall  = int(win.findtext("wall"))
-            wox   = float(win.find("origin/x").text)
-            woy   = float(win.find("origin/y").text)
-            ww    = float(win.find("size/width").text)
-            wh    = float(win.find("size/height").text)
-            pts   = _wall_opening(ox, oy, oz, xs, ys, zs, wall, wox, woy, ww, wh)
-            builder.add_polygon(pts, "Window")
+    wins_el = b.find("windows")
+    if wins_el is not None:
+        for w in wins_el.findall("window"):
+            wall = int(w.findtext("wall"))
+            wox  = float(w.find("origin/x").text)
+            woy  = float(w.find("origin/y").text)
+            ww   = float(w.find("size/width").text)
+            wh   = float(w.find("size/height").text)
+            pts  = _opening_pts(ox, oy, oz, xs, ys, wall, wox, woy, ww, wh)
+            builder.poly(pts, wall_uv(ww, wh), "Window")
 
-    # Building parts (garage / alcove)
     bp = b.find("buildingPart")
     if bp is not None:
         p_orig = float(bp.findtext("partOrigin"))
-        pw  = float(bp.findtext("width"))
-        pl  = float(bp.findtext("length"))
-        ph  = float(bp.findtext("height"))
-        # Part is attached on east side (wall 1, x = ox+xs)
+        pw = float(bp.findtext("width"))
+        pl = float(bp.findtext("length"))
+        ph = float(bp.findtext("height"))
         pox, poy, poz = ox + xs, oy + p_orig, oz
-        pfaces = box_faces(pox, poy, poz, pw, pl, ph)
-        for side in ("south", "north", "west", "east", "top"):
-            builder.add_polygon(pfaces[side], "Wall")
-        builder.add_polygon(pfaces["bottom"], "Floor")
+        add_box(builder, pox, poy, poz, pw, pl, ph, wall_mat, "Floor")
+        builder.poly([(pox,poy,poz+ph),(pox,poy+pl,poz+ph),(pox+pw,poy+pl,poz+ph),(pox+pw,poy,poz+ph)],
+                     flat_uv(pw, pl), roof_mat)
 
+# ── Road network ─────────────────────────────────────────────────────────────
+# Geometry constants matching randomiseCity.py defaults.
+CELLSIZE = 20.0
+SKIP     = 2          # roads every SKIP cells (matches streetgenerator skipx/skipy=2)
+ROAD_W   = 5.0
+SEP      = 1.0        # gap between road edge and building block
 
-# ---------------------------------------------------------------------------
-# Road / vegetation helpers
-# ---------------------------------------------------------------------------
+def _vstrip(builder, x0, x1, y0, y1, mat):
+    w, l = x1-x0, y1-y0
+    builder.poly([(x0,y0,0),(x1,y0,0),(x1,y1,0),(x0,y1,0)], wall_uv(w, l), mat)
 
-def export_road(outline_coords, builder):
-    x0, y0, x1, y1 = outline_coords
-    builder.add_polygon([(x0, y0, 0), (x1, y0, 0), (x1, y1, 0), (x0, y1, 0)], "Road")
+def _hstrip(builder, y0, y1, x0, x1, mat):
+    l, w = x1-x0, y1-y0
+    builder.poly([(x0,y0,0),(x1,y0,0),(x1,y1,0),(x0,y1,0)], wall_uv(l, w), mat)
 
+def generate_road_network(builder, max_col, max_row):
+    # City bounding box (including outer road strips)
+    cx0 = -(SEP + ROAD_W)
+    cx1 = (max_col + 1) * CELLSIZE + ROAD_W
+    cy0 = -(SEP + ROAD_W)
+    cy1 = (max_row + 1) * CELLSIZE + ROAD_W
+    margin = 10.0
 
-def export_park(outline_coords, builder):
-    x0, y0, x1, y1 = outline_coords
-    builder.add_polygon([(x0, y0, 0), (x1, y0, 0), (x1, y1, 0), (x0, y1, 0)], "Park")
+    # Grass ground base
+    builder.group("ground")
+    gx0, gx1 = cx0 - margin, cx1 + margin
+    gy0, gy1 = cy0 - margin, cy1 + margin
+    builder.poly([(gx0,gy0,-0.05),(gx1,gy0,-0.05),(gx1,gy1,-0.05),(gx0,gy1,-0.05)],
+                 flat_uv(gx1-gx0, gy1-gy0), "Ground")
 
+    # Collect road strip x-positions (vertical roads)
+    road_xs = []
+    road_xs.append((cx0, cx0 + ROAD_W))                          # left edge
+    for k in range(max_col // SKIP + 1):                          # internal
+        x0 = (k + 1) * SKIP * CELLSIZE - SEP - ROAD_W
+        x1 = x0 + ROAD_W
+        if cx0 < x0 < cx1:
+            road_xs.append((x0, x1))
+    road_xs.append((cx1 - ROAD_W, cx1))                          # right edge
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+    # Collect road strip y-positions (horizontal roads)
+    road_ys = []
+    road_ys.append((cy0, cy0 + ROAD_W))
+    for k in range(max_row // SKIP + 1):
+        y0 = (k + 1) * SKIP * CELLSIZE - SEP - ROAD_W
+        y1 = y0 + ROAD_W
+        if cy0 < y0 < cy1:
+            road_ys.append((y0, y1))
+    road_ys.append((cy1 - ROAD_W, cy1))
+
+    # Road asphalt strips
+    builder.group("roads")
+    for x0, x1 in road_xs:
+        _vstrip(builder, x0, x1, cy0, cy1, "Road")
+    for y0, y1 in road_ys:
+        _hstrip(builder, y0, y1, cx0, cx1, "Road")
+
+    # Sidewalks (1.5 m wide, on both sides of every road strip)
+    builder.group("sidewalks")
+    sw = 1.5
+    for x0, x1 in road_xs:
+        if x0 - sw > cx0:
+            _vstrip(builder, x0 - sw, x0, cy0, cy1, "Sidewalk")
+        if x1 + sw < cx1:
+            _vstrip(builder, x1, x1 + sw, cy0, cy1, "Sidewalk")
+    for y0, y1 in road_ys:
+        if y0 - sw > cy0:
+            _hstrip(builder, y0 - sw, y0, cx0, cx1, "Sidewalk")
+        if y1 + sw < cy1:
+            _hstrip(builder, y1, y1 + sw, cx0, cx1, "Sidewalk")
+
+    # Dashed centre-line lane markings
+    builder.group("lane_markings")
+    mw  = 0.12   # marking width
+    ml  = 3.0    # dash length
+    mg  = 3.0    # gap between dashes
+    for x0, x1 in road_xs:
+        cx = (x0 + x1) / 2
+        y  = cy0 + 1.0
+        while y + ml < cy1:
+            _vstrip(builder, cx - mw/2, cx + mw/2, y, y + ml, "Marking")
+            y += ml + mg
+    for y0, y1 in road_ys:
+        cy = (y0 + y1) / 2
+        x  = cx0 + 1.0
+        while x + ml < cx1:
+            _hstrip(builder, cy - mw/2, cy + mw/2, x, x + ml, "Marking")
+            x += ml + mg
+
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     lod = ARGS.lod
     print(f"Parsing {ARGS.input} ...")
-    tree = etree.parse(ARGS.input)
-    root = tree.getroot()
-
+    root = etree.parse(ARGS.input).getroot()
     buildings = root.findall("building")
-    print(f"Found {len(buildings)} building(s). Exporting at LOD {lod}...")
+    print(f"Found {len(buildings)} building(s). Exporting at LOD {lod} ...")
+
+    mats = build_material_table()
+
+    # Grid extent from building order elements
+    max_col, max_row = 0, 0
+    for b in buildings:
+        order = b.findtext("order")
+        if order:
+            col, row = int(order.split()[0]), int(order.split()[1])
+            max_col = max(max_col, col)
+            max_row = max(max_row, row)
 
     if ARGS.split:
         out_dir = ARGS.output
         os.makedirs(out_dir, exist_ok=True)
         mtl_name = "city.mtl"
-        write_mtl(os.path.join(out_dir, mtl_name))
+        write_mtl(os.path.join(out_dir, mtl_name), mats)
         for i, b in enumerate(buildings):
             bld = OBJBuilder()
             export_building(b, bld, lod)
-            bid = b.attrib.get("ID", f"building_{i:04d}")
+            bid   = b.attrib.get("ID", f"b{i:04d}")
             fname = os.path.join(out_dir, f"{bid[:8]}_{i:04d}.obj")
             bld.write(fname, mtl_name)
         print(f"Written {len(buildings)} .obj files to {out_dir}/")
     else:
         out_path = ARGS.output
-        mtl_name = os.path.splitext(os.path.basename(out_path))[0] + ".mtl"
+        mtl_stem = os.path.splitext(os.path.basename(out_path))[0]
+        mtl_name = mtl_stem + ".mtl"
         mtl_path = os.path.join(os.path.dirname(out_path) or ".", mtl_name)
-        write_mtl(mtl_path)
+        write_mtl(mtl_path, mats)
 
         builder = OBJBuilder()
+        generate_road_network(builder, max_col, max_row)
 
-        # Buildings
         for b in buildings:
             export_building(b, builder, lod)
 
-        # Roads
-        streets_el = root.find("Streets")
-        if streets_el is not None:
-            builder.group("roads")
-            outline_text = streets_el.findtext("outline")
-            if outline_text:
-                coords = [float(v) for v in outline_text.split()]
-                export_road(coords, builder)
-
-        # Vegetation / parks
         parks_el = root.find("parks")
         if parks_el is not None:
             builder.group("parks")
             for park in parks_el.findall("park"):
-                outline_text = park.findtext("outline")
-                if outline_text:
-                    coords = [float(v) for v in outline_text.split()]
-                    export_park(coords, builder)
+                txt = park.findtext("outline")
+                if txt:
+                    x0, y0, x1, y1 = [float(v) for v in txt.split()]
+                    builder.poly([(x0,y0,0.02),(x1,y0,0.02),(x1,y1,0.02),(x0,y1,0.02)],
+                                 flat_uv(abs(x1-x0), abs(y1-y0)), "Park")
 
         builder.write(out_path, mtl_name)
-        print(f"Written {out_path}  ({len(builder.vertices)} vertices, {len(builder.faces)} faces)")
+        print(f"Written {out_path}  ({len(builder.verts):,} vertices, {len(builder.faces):,} faces)")
         print(f"Material library: {mtl_path}")
         print()
         print("Import into your engine:")
         print("  Blender  : File > Import > Wavefront (.obj)")
         print("  Unity    : drag the .obj and .mtl into your Assets folder")
         print("  Unreal   : File > Import into Level  (select the .obj)")
-
 
 if __name__ == "__main__":
     main()
