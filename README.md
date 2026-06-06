@@ -4,6 +4,9 @@ Procedurally generates entire city blocks with randomised buildings — roofs, w
 
 Inspired by Esri's CityEngine. Supports 16 levels of detail (LOD 0–4).
 
+<img width="1146" height="570" alt="image" src="https://github.com/user-attachments/assets/842fa26a-3509-4eda-bbf8-b24ba77aa19b" />
+
+
 ---
 
 ## Quick start
