@@ -1,0 +1,121 @@
+name: Build Kenya 3D Cadastre Tiles
+
+# Triggers:
+#   1. Push the "Build tiles" button in GitHub → Actions tab
+#   2. Automatic monthly refresh on the 1st at 02:00 UTC
+#   3. Any push that touches the build pipeline scripts
+
+on:
+  workflow_dispatch:          # manual trigger
+  schedule:
+    - cron: '0 2 1 * *'       # monthly — 1st of each month at 02:00 UTC
+  push:
+    paths:
+      - 'build_kenya_dataset.py'
+      - 'kenya_counties.py'
+      - 'importMicrosoftFootprints.py'
+      - 'osmToXML.py'
+      - 'exportToGeoJSON.py'
+
+jobs:
+  build:
+    name: Build → Tile → Upload
+    runs-on: ubuntu-latest
+    timeout-minutes: 180       # 3-hour ceiling (47 counties + tile gen)
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python ────────────────────────────────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: pip install requests lxml
+
+      # ── 3. Cache Microsoft building tiles (~/.3dcadastre_ms/) ────────────────
+      # Microsoft tiles are large (5–124 MB each) and change rarely.
+      # Caching avoids re-downloading them on every run.
+      # Cache key rotates monthly so tiles refresh automatically.
+      - name: Cache Microsoft tiles
+        uses: actions/cache@v4
+        with:
+          path: ~/.3dcadastre_ms
+          key: ms-tiles-${{ runner.os }}-${{ steps.date.outputs.month }}
+          restore-keys: ms-tiles-${{ runner.os }}-
+
+      - name: Get current month (for cache key)
+        id: date
+        run: echo "month=$(date +'%Y-%m')" >> $GITHUB_OUTPUT
+
+      # ── 4. Build GeoJSON dataset ──────────────────────────────────────────────
+      # Runs build_kenya_dataset.py for all 47 counties.
+      # Falls back to heuristics for any county where Overpass API times out.
+      - name: Build Kenya buildings dataset (all 47 counties)
+        run: |
+          python build_kenya_dataset.py \
+            --radius 2000 \
+            --source microsoft \
+            --output kenya-buildings.geojson \
+            --stats
+        env:
+          PYTHONUNBUFFERED: "1"   # show progress in real time
+
+      - name: Report GeoJSON size
+        run: |
+          SIZE=$(du -sh kenya-buildings.geojson | cut -f1)
+          COUNT=$(python -c "import json; d=json.load(open('kenya-buildings.geojson')); print(len(d['features']))")
+          echo "## Dataset built" >> $GITHUB_STEP_SUMMARY
+          echo "- File size: **$SIZE**" >> $GITHUB_STEP_SUMMARY
+          echo "- Total features: **$COUNT**" >> $GITHUB_STEP_SUMMARY
+
+      # ── 5. Install tippecanoe ─────────────────────────────────────────────────
+      - name: Install tippecanoe
+        run: sudo apt-get install -y tippecanoe
+
+      # ── 6. Generate PMTiles ───────────────────────────────────────────────────
+      # zoom 13–16: buildings appear at zoom 13 and have full detail at 16.
+      # --drop-densest-as-needed: removes least-important features if a tile
+      #   exceeds the 500 KB limit — keeps all data at high zoom levels.
+      - name: Convert GeoJSON → PMTiles
+        run: |
+          tippecanoe \
+            --output kenya-buildings.pmtiles \
+            --layer buildings \
+            --minimum-zoom 13 \
+            --maximum-zoom 16 \
+            --drop-densest-as-needed \
+            --extend-zooms-if-still-dropping \
+            --simplification 2 \
+            --force \
+            kenya-buildings.geojson
+
+      - name: Report PMTiles size
+        run: |
+          SIZE=$(du -sh kenya-buildings.pmtiles | cut -f1)
+          echo "- PMTiles size: **$SIZE**" >> $GITHUB_STEP_SUMMARY
+
+      # ── 7. Upload to Cloudflare R2 ────────────────────────────────────────────
+      # Requires two repository secrets (Settings → Secrets → Actions):
+      #   CLOUDFLARE_ACCOUNT_ID  — from cloudflare.com → Overview (right column)
+      #   CLOUDFLARE_API_TOKEN   — create at cloudflare.com → My Profile → API Tokens
+      #                            with R2 Object Read & Write permission
+      - name: Upload PMTiles to Cloudflare R2
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN:  ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          npm install -g wrangler --silent
+          wrangler r2 object put cadastre-kenya/kenya-buildings.pmtiles \
+            --file kenya-buildings.pmtiles \
+            --content-type application/vnd.pmtiles \
+            --remote
+
+      - name: Done
+        run: |
+          echo "- Uploaded to: **https://pub-\${{ secrets.CF_PUBLIC_ID }}.r2.dev/kenya-buildings.pmtiles**" >> $GITHUB_STEP_SUMMARY
+          echo "Set NEXT_PUBLIC_PMTILES_URL in Vercel to the R2 public URL."
