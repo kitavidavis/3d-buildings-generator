@@ -234,7 +234,8 @@ function closePanel() {
   document.getElementById('panel').classList.remove('open');
   tooltip.style.display = 'none';
   if (hlMesh) { hlMesh.renderOverlay = false; hlMesh = null; }
-  if (mlMap)  mlMap.setFilter('buildings-select', ['==', 'buildingID', '']);
+  if (mlMap && mlMap.getLayer('bldg-select'))
+    mlMap.setFilter('bldg-select', ['==', 'buildingID', '']);
 }
 
 function showPanel(title, ex) {
@@ -301,116 +302,173 @@ function startMapLibre(geojson, filename) {
   });
   const cLon = (minLon+maxLon)/2, cLat = (minLat+maxLat)/2;
 
+  // OpenFreeMap "Positron" — clean minimal vector style, free, no API key.
+  // Very close to the CartoDB Positron / TU Delft 3D BAG aesthetic:
+  // near-white map, clean road network, subtle water bodies.
   mlMap = new maplibregl.Map({
     container: 'mapgl',
-    style: {
-      version: 8,
-      sources: {
-        osm: {
-          type: 'raster',
-          tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-          tileSize: 256,
-          attribution: '© <a href="https://openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-        }
-      },
-      layers: [{ id: 'osm-tiles', type: 'raster', source: 'osm' }],
-    },
+    style: 'https://tiles.openfreemap.org/styles/positron',
     center: [cLon, cLat],
-    zoom: 17,
-    pitch: 50,
-    bearing: -10,
-    antialias: true,
+    zoom: 16.5,
+    pitch: 55,
+    bearing: -15,
+    antialias: true,   // smooth building edges — critical for quality
   });
+
+  // Store centre for reset button (must capture before map.on callbacks)
+  const initCenter = [cLon, cLat];
 
   mlMap.on('load', () => {
-    // Add building source
-    mlMap.addSource('buildings', { type: 'geojson', data: geojson });
 
-    // Base fill (ground footprint)
+    // ── Remove the style's own building layers ──────────────────────────────
+    // Positron includes a 2D building footprint fill; remove it so our
+    // cadastral extrusions are the only building geometry.
+    mlMap.getStyle().layers
+      .filter(l => /building/i.test(l.id) || /building/i.test(l['source-layer'] || ''))
+      .forEach(l => { try { mlMap.removeLayer(l.id); } catch(_){} });
+
+    // ── Directional sun — NW angle, matching the TU Delft render style ─────
+    mlMap.setLight({
+      anchor:    'map',
+      color:     '#ffffff',
+      intensity:  0.45,
+      position:  [1.5, 310, 35],  // [r, azimuthal °(N=0,E=90), polar °(zenith=0)]
+    });
+
+    // ── GeoJSON source ──────────────────────────────────────────────────────
+    mlMap.addSource('cadastre', { type: 'geojson', data: geojson });
+
+    // ── Soft shadow under each footprint ───────────────────────────────────
     mlMap.addLayer({
-      id: 'buildings-fill',
-      type: 'fill-extrusion',
-      source: 'buildings',
+      id: 'bldg-shadow',
+      type: 'fill',
+      source: 'cadastre',
       filter: ['has', 'heightM'],
       paint: {
-        'fill-extrusion-color': ['coalesce', ['get', 'wallColor'], '#ccb894'],
-        'fill-extrusion-height': ['get', 'heightM'],
-        'fill-extrusion-base': 0,
-        'fill-extrusion-opacity': 0.88,
-      }
+        'fill-color': '#000',
+        'fill-opacity': ['interpolate', ['linear'], ['zoom'], 14, 0.04, 18, 0.10],
+        'fill-translate': [3, 4],
+      },
     });
 
-    // Selection highlight layer (initially shows nothing)
+    // ── Main building extrusion — uniform warm grey, TU Delft aesthetic ────
+    // fill-extrusion-vertical-gradient: true gives each face a different shade
+    // based on the directional light, creating the depth in the TU Delft image.
     mlMap.addLayer({
-      id: 'buildings-select',
+      id: 'bldg-fill',
       type: 'fill-extrusion',
-      source: 'buildings',
+      source: 'cadastre',
+      filter: ['has', 'heightM'],
+      paint: {
+        'fill-extrusion-color': '#d6d3cf',      // warm grey — matches TU Delft
+        'fill-extrusion-height': ['get', 'heightM'],
+        'fill-extrusion-base': 0,
+        'fill-extrusion-opacity': 0.94,
+        'fill-extrusion-vertical-gradient': true, // light/shadow per face via setLight()
+      },
+    });
+
+    // ── Hover / click highlight ─────────────────────────────────────────────
+    mlMap.addLayer({
+      id: 'bldg-select',
+      type: 'fill-extrusion',
+      source: 'cadastre',
       filter: ['==', 'buildingID', ''],
       paint: {
-        'fill-extrusion-color': '#63b3ed',
-        'fill-extrusion-height': ['get', 'heightM'],
+        'fill-extrusion-color': '#4299e1',
+        'fill-extrusion-height': ['+', ['get', 'heightM'], 0.5],  // slightly taller = outline effect
         'fill-extrusion-base': 0,
-        'fill-extrusion-opacity': 0.75,
-      }
+        'fill-extrusion-opacity': 0.80,
+        'fill-extrusion-vertical-gradient': true,
+      },
     });
 
-    // Road lines
+    // ── Park polygons ───────────────────────────────────────────────────────
     mlMap.addLayer({
-      id: 'roads-line',
-      type: 'line',
-      source: 'buildings',
-      filter: ['==', ['get', 'featureType'], 'road'],
-      paint: {
-        'line-color': '#4a5568',
-        'line-width': ['interpolate', ['linear'], ['zoom'],
-          14, ['*', ['get', 'widthM'], 0.3],
-          18, ['*', ['get', 'widthM'], 1.5]
-        ],
-        'line-opacity': 0.8,
-      }
-    });
-
-    // Park fills
-    mlMap.addLayer({
-      id: 'parks-fill',
+      id: 'park-fill',
       type: 'fill',
-      source: 'buildings',
+      source: 'cadastre',
       filter: ['==', ['get', 'featureType'], 'park'],
+      paint: { 'fill-color': '#c8e6c4', 'fill-opacity': 0.55 },
+    });
+
+    // ── Road centre-lines (only if exported with --roads) ──────────────────
+    // Hidden at high zoom where the vector basemap roads are sufficient.
+    mlMap.addLayer({
+      id: 'road-line',
+      type: 'line',
+      source: 'cadastre',
+      filter: ['==', ['get', 'featureType'], 'road'],
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
-        'fill-color': '#276749',
-        'fill-opacity': 0.35,
-      }
+        'line-color': '#aaa',
+        'line-width': ['interpolate', ['linear'], ['zoom'],
+          14, ['*', ['get', 'widthM'], 0.4],
+          18, ['*', ['get', 'widthM'], 1.6],
+        ],
+        'line-opacity': ['interpolate', ['linear'], ['zoom'], 16, 0.6, 18, 0.2],
+      },
     });
 
-    // Click to inspect
-    mlMap.on('click', 'buildings-fill', e => {
-      const props = e.features[0].properties;
-      mlMap.setFilter('buildings-select', ['==', 'buildingID', props.buildingID]);
-      const title = props.osmID
-        ? `Building OSM #${props.osmID}`
-        : `Building ${props.buildingID.substring(0,8)}`;
-      showPanel(title, props);
+    // ── Interaction ─────────────────────────────────────────────────────────
+    mlMap.on('click', 'bldg-fill', e => {
+      const p = e.features[0].properties;
+      mlMap.setFilter('bldg-select', ['==', 'buildingID', p.buildingID || '']);
+      showPanel(
+        p.osmID ? `Building OSM #${p.osmID}` : `Building ${(p.buildingID||'').substring(0,8)}`,
+        p,
+      );
     });
-
-    // Click on empty space → deselect
     mlMap.on('click', e => {
-      const fs = mlMap.queryRenderedFeatures(e.point, { layers: ['buildings-fill'] });
-      if (!fs.length) closePanel();
+      if (!mlMap.queryRenderedFeatures(e.point, { layers: ['bldg-fill'] }).length)
+        closePanel();
     });
-
-    // Hover cursor
-    mlMap.on('mouseenter', 'buildings-fill', () => { mlMap.getCanvas().style.cursor = 'pointer'; });
-    mlMap.on('mouseleave', 'buildings-fill', () => { mlMap.getCanvas().style.cursor = ''; });
+    mlMap.on('mouseenter', 'bldg-fill', e => {
+      mlMap.getCanvas().style.cursor = 'pointer';
+      const p = e.features[0].properties;
+      const label = p.osmID ? `OSM #${p.osmID}` : (p.buildingID||'').substring(0,8);
+      const ev = e.originalEvent;
+      tooltip.style.display = 'block';
+      tooltip.style.left    = (ev.clientX + 14) + 'px';
+      tooltip.style.top     = (ev.clientY  -  6) + 'px';
+      tooltip.textContent   = label;
+    });
+    mlMap.on('mouseleave', 'bldg-fill', () => {
+      mlMap.getCanvas().style.cursor = '';
+      tooltip.style.display = 'none';
+    });
   });
 
-  // Controls
+  // ── Controls ───────────────────────────────────────────────────────────────
   document.getElementById('controls').innerHTML = `
-    <button class="ctrl-btn" onclick="mlMap && mlMap.flyTo({zoom:17,pitch:50,bearing:-10})">⟳ Reset view</button>
-    <button class="ctrl-btn" onclick="mlMap && mlMap.setPitch(0)">🗺 Top-down</button>
+    <button class="ctrl-btn" id="btn-reset"
+      onclick="mlMap&&mlMap.flyTo({center:[${cLon},${cLat}],zoom:16.5,pitch:55,bearing:-15,duration:800})">
+      ⟳ Reset view</button>
+    <button class="ctrl-btn"
+      onclick="mlMap&&mlMap.easeTo({pitch:0,bearing:0,duration:600})">
+      🗺 Top-down</button>
+    <button class="ctrl-btn" id="btn-colour" onclick="toggleBldgColour()">
+      🎨 Colour by usage</button>
   `;
 
-  mlMap.addControl(new maplibregl.NavigationControl(), 'bottom-left');
-  mlMap.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-left');
+  mlMap.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'bottom-left');
+  mlMap.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
+}
+
+// Colour mode toggle (grey ↔ usage-coded)
+let _colourGrey = true;
+function toggleBldgColour() {
+  if (!mlMap || !mlMap.getLayer('bldg-fill')) return;
+  _colourGrey = !_colourGrey;
+  const expr = _colourGrey
+    ? '#d6d3cf'
+    : ['match', ['get', 'usage'],
+        'Residential', '#b8d4ee',
+        'industrial',  '#f5d8b0',
+        /* default */  '#d6d3cf'];
+  mlMap.setPaintProperty('bldg-fill', 'fill-extrusion-color', expr);
+  document.getElementById('btn-colour').textContent =
+    _colourGrey ? '🎨 Colour by usage' : '⬜ Uniform grey';
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -458,8 +516,22 @@ function initBabylon() {
 
   const hemi = new BABYLON.HemisphericLight('h', new BABYLON.Vector3(0,1,0), bScene);
   hemi.intensity = 0.65; hemi.groundColor = new BABYLON.Color3(0.3,0.3,0.3);
-  const sun = new BABYLON.DirectionalLight('sun', new BABYLON.Vector3(-1,-1.5,-0.5), bScene);
-  sun.intensity = 0.85;
+  
+  // Directional sun light with realistic shadows
+  const sun = new BABYLON.DirectionalLight('sun', new BABYLON.Vector3(0.8, -1.2, 0.6), bScene);
+  sun.intensity = 1.0;
+  sun.position = new BABYLON.Vector3(50, 80, 50);
+  sun.shadowMinZ = -100;
+  sun.shadowMaxZ = 200;
+  
+  // Enable shadow map for more realistic rendering
+  const shadowGen = new BABYLON.ShadowGenerator(1024, sun);
+  shadowGen.useBlurExponentialShadowMap = true;
+  shadowGen.blurKernel = 16;
+  bScene.meshes.forEach(mesh => {
+    if (mesh.receiveShadows !== undefined) mesh.receiveShadows = true;
+    if (mesh.castShadows !== undefined) mesh.castShadows = true;
+  });
 
   engine.runRenderLoop(() => bScene && bScene.render());
   window.addEventListener('resize', () => engine.resize());
