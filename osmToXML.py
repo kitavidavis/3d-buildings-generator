@@ -34,7 +34,10 @@ PARSER = argparse.ArgumentParser(description="OSM buildings → BuildingInformat
 PARSER.add_argument("--city",   help="Kenyan city name (Nairobi, Mombasa, Kisumu, Nakuru, Eldoret, Thika, Nyeri, Malindi)")
 PARSER.add_argument("--lat",    type=float, help="Custom centre latitude  (overrides --city)")
 PARSER.add_argument("--lon",    type=float, help="Custom centre longitude (overrides --city)")
-PARSER.add_argument("--radius", type=int,   default=600, help="Query radius in metres (default 600)")
+PARSER.add_argument("--radius", type=int, default=600,
+    help="Query radius in metres (default 600; practical max ~2000 for dense cities)")
+PARSER.add_argument("--max-buildings", type=int, default=5000,
+    help="Stop after this many buildings to avoid huge files (default 5000)")
 PARSER.add_argument("--output", required=True, help="Output XML filename")
 ARGS = PARSER.parse_args()
 
@@ -109,8 +112,10 @@ ROAD_WIDTHS = {
 
 def fetch_city_data(lat, lon, radius):
     """Fetch buildings, roads, and green areas from OSM in one query."""
+    # Scale the Overpass server-side timeout with the query radius
+    api_timeout = min(180, max(60, radius // 10))
     query = f"""
-[out:json][timeout:90];
+[out:json][timeout:{api_timeout}];
 (
   way["building"](around:{radius},{lat},{lon});
   relation["building"](around:{radius},{lat},{lon});
@@ -125,7 +130,8 @@ out skel qt;
 """
     print(f"Fetching buildings, roads and green areas within {radius} m of ({lat:.4f}, {lon:.4f}) ...")
     headers = {"User-Agent": "3D-Cadastre-Kenya/1.0 (github.com/kitavidavis/3d-buildings-generator)"}
-    resp = requests.post(OVERPASS_URL, data={"data": query}, headers=headers, timeout=120)
+    resp = requests.post(OVERPASS_URL, data={"data": query}, headers=headers,
+                          timeout=api_timeout + 30)
     resp.raise_for_status()
     return resp.json()
 
@@ -308,6 +314,12 @@ def main():
 
     root = etree.Element("specifications")
     count = 0
+
+    max_bldgs = ARGS.max_buildings
+    if len(osm_buildings) > max_bldgs:
+        print(f"Capping at {max_bldgs} buildings (found {len(osm_buildings)}). "
+              f"Use --max-buildings N to raise the limit.")
+        osm_buildings = osm_buildings[:max_bldgs]
 
     # ── Buildings ────────────────────────────────────────────────────────────
     for bldg in osm_buildings:
