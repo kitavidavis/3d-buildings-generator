@@ -31,7 +31,17 @@ except ImportError:
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 PARSER = argparse.ArgumentParser(description="OSM buildings → BuildingInformation.xml (Kenya 3D Cadastre)")
-PARSER.add_argument("--city",   help="Kenyan city name (Nairobi, Mombasa, Kisumu, Nakuru, Eldoret, Thika, Nyeri, Malindi)")
+from kenya_counties import ALL_COUNTIES, TOWN_ALIASES
+
+# Build a single lookup: county names + town aliases → (lat, lon)
+CITY_CENTRES = {**ALL_COUNTIES}
+for alias, county in TOWN_ALIASES.items():
+    if alias not in CITY_CENTRES and county in ALL_COUNTIES:
+        CITY_CENTRES[alias] = ALL_COUNTIES[county]
+
+_ALL_NAMES = ", ".join(sorted(CITY_CENTRES.keys()))
+
+PARSER.add_argument("--city",   help=f"County or town name. All 47 counties supported. Examples: Nairobi, Mombasa, Kisumu, Turkana, Garissa, Lamu...")
 PARSER.add_argument("--lat",    type=float, help="Custom centre latitude  (overrides --city)")
 PARSER.add_argument("--lon",    type=float, help="Custom centre longitude (overrides --city)")
 PARSER.add_argument("--radius", type=int, default=600,
@@ -39,20 +49,6 @@ PARSER.add_argument("--radius", type=int, default=600,
 PARSER.add_argument("--max-buildings", type=int, default=5000,
     help="Stop after this many buildings to avoid huge files (default 5000)")
 PARSER.add_argument("--output", required=True, help="Output XML filename")
-ARGS = PARSER.parse_args()
-
-# ── Known Kenyan city centres (lat, lon) ─────────────────────────────────────
-
-CITY_CENTRES = {
-    "Nairobi":  (-1.2921,  36.8219),
-    "Mombasa":  (-4.0435,  39.6682),
-    "Kisumu":   (-0.1022,  34.7617),
-    "Nakuru":   (-0.3031,  36.0800),
-    "Eldoret":  ( 0.5143,  35.2698),
-    "Thika":    (-1.0332,  37.0693),
-    "Nyeri":    (-0.4167,  36.9500),
-    "Malindi":  (-3.2138,  40.1169),
-}
 
 # ── UTM helpers (Arc 1960 / WGS84 → EPSG:21037 approx) ──────────────────────
 
@@ -488,9 +484,14 @@ def main():
     elif ARGS.city:
         city = ARGS.city.strip().title()
         if city not in CITY_CENTRES:
-            known = ", ".join(CITY_CENTRES.keys())
-            print(f"Unknown city '{city}'. Supported: {known}")
-            sys.exit(1)
+            # Try case-insensitive match
+            match = next((k for k in CITY_CENTRES if k.lower() == city.lower()), None)
+            if match:
+                city = match
+            else:
+                print(f"Unknown location '{city}'.")
+                print(f"Supported counties: {', '.join(sorted(ALL_COUNTIES.keys()))}")
+                sys.exit(1)
         centre_lat, centre_lon = CITY_CENTRES[city]
         label = city
     else:

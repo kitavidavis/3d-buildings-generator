@@ -40,12 +40,16 @@ from collections import defaultdict
 # Add the project root to path so we can import from our scripts
 sys.path.insert(0, str(Path(__file__).parent))
 
+# kenya_counties is imported by PARSER section below
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 PARSER = argparse.ArgumentParser(description="Build the Kenya 3D Cadastre dataset")
+from kenya_counties import ALL_COUNTIES, TOWN_ALIASES
+
 PARSER.add_argument("--cities", nargs="*",
-    default=["Nairobi", "Mombasa", "Kisumu", "Nakuru", "Eldoret", "Thika", "Nyeri", "Malindi"],
-    help="Cities to include (default: all 8)")
+    default=list(ALL_COUNTIES.keys()),
+    help="Counties to include (default: all 47). Example: --cities Nairobi Mombasa Kisumu")
 PARSER.add_argument("--radius", type=int, default=2500,
     help="Coverage radius per city in metres (default 2500)")
 PARSER.add_argument("--source", choices=["osm", "microsoft", "both"], default="microsoft",
@@ -58,15 +62,10 @@ ARGS = PARSER.parse_args()
 
 # ── City centres ─────────────────────────────────────────────────────────────
 
+# Build city centres from all 47 counties
 CITY_CENTRES = {
-    "Nairobi":  {"lat": -1.2884, "lon": 36.8218, "radius_km": 8.0},
-    "Mombasa":  {"lat": -4.0435, "lon": 39.6682, "radius_km": 5.0},
-    "Kisumu":   {"lat": -0.1022, "lon": 34.7617, "radius_km": 4.0},
-    "Nakuru":   {"lat": -0.3031, "lon": 36.0800, "radius_km": 4.0},
-    "Eldoret":  {"lat":  0.5143, "lon": 35.2698, "radius_km": 3.5},
-    "Thika":    {"lat": -1.0332, "lon": 37.0693, "radius_km": 3.0},
-    "Nyeri":    {"lat": -0.4167, "lon": 36.9500, "radius_km": 3.0},
-    "Malindi":  {"lat": -3.2138, "lon": 40.1169, "radius_km": 3.0},
+    name: {"lat": lat, "lon": lon}
+    for name, (lat, lon) in ALL_COUNTIES.items()
 }
 
 # ── Derived metrics ───────────────────────────────────────────────────────────
@@ -307,7 +306,11 @@ def main():
         if city not in CITY_CENTRES:
             print(f"  Unknown city '{city}' — skipping")
             continue
-        info = CITY_CENTRES[city]
+        info = CITY_CENTRES.get(city) or CITY_CENTRES.get(
+            next((k for k in CITY_CENTRES if k.lower() == city.lower()), ""))
+        if not info:
+            print(f"  Unknown county '{city}' — skipping")
+            continue
         try:
             features = run_city(city, info["lat"], info["lon"], radius, ARGS.source)
             all_features.extend(features)

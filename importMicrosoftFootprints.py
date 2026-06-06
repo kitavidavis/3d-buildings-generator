@@ -52,7 +52,7 @@ except ImportError:
 
 PARSER = argparse.ArgumentParser(
     description="Microsoft building footprints + OSM attributes -> BuildingInformation.xml")
-PARSER.add_argument("--city",   help="Kenyan city (Nairobi/Mombasa/Kisumu/Nakuru/Eldoret/Thika/Nyeri/Malindi)")
+PARSER.add_argument("--city",   help="Any of Kenya's 47 counties or major towns. E.g.: Nairobi, Turkana, Garissa, Lamu, Kisii...")
 PARSER.add_argument("--lat",    type=float, help="Custom centre latitude  (overrides --city)")
 PARSER.add_argument("--lon",    type=float, help="Custom centre longitude (overrides --city)")
 PARSER.add_argument("--radius", type=int,   default=600, help="Radius in metres (default 600)")
@@ -63,20 +63,13 @@ PARSER.add_argument("--match-radius", type=float, default=30.0,
                     help="Max metres for OSM↔Microsoft centroid matching (default 30)")
 ARGS = PARSER.parse_args()
 
-# ── City centres (EPSG:4326) ──────────────────────────────────────────────────
+# ── All 47 counties + town aliases ───────────────────────────────────────────
+from kenya_counties import ALL_COUNTIES, TOWN_ALIASES
 
-CITY_CENTRES = {
-    # Nairobi: centred on the CBD triangle (Times Tower / KICC / Parliament)
-    # Use --radius 800 to capture Times Tower (560 m) and KICC (820 m).
-    "Nairobi":  (-1.2884,  36.8218),
-    "Mombasa":  (-4.0435,  39.6682),
-    "Kisumu":   (-0.1022,  34.7617),
-    "Nakuru":   (-0.3031,  36.0800),
-    "Eldoret":  ( 0.5143,  35.2698),
-    "Thika":    (-1.0332,  37.0693),
-    "Nyeri":    (-0.4167,  36.9500),
-    "Malindi":  (-3.2138,  40.1169),
-}
+CITY_CENTRES = {**ALL_COUNTIES}
+for _alias, _county in TOWN_ALIASES.items():
+    if _alias not in CITY_CENTRES and _county in ALL_COUNTIES:
+        CITY_CENTRES[_alias] = ALL_COUNTIES[_county]
 
 # ── Microsoft dataset constants ───────────────────────────────────────────────
 
@@ -508,8 +501,13 @@ def main():
     elif ARGS.city:
         city = ARGS.city.strip().title()
         if city not in CITY_CENTRES:
-            print(f"Unknown city. Supported: {', '.join(CITY_CENTRES)}")
-            sys.exit(1)
+            match = next((k for k in CITY_CENTRES if k.lower() == city.lower()), None)
+            if match:
+                city = match
+            else:
+                print(f"Unknown location '{city}'.")
+                print(f"All 47 counties: {', '.join(sorted(ALL_COUNTIES.keys()))}")
+                sys.exit(1)
         clat, clon = CITY_CENTRES[city]
         label = city
     else:

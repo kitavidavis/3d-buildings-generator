@@ -794,18 +794,19 @@ def randomwindow(side, fl, xs, ys, zs, floorHeight, fixed=None):
     else:
         raise ValueError("Not supported at the moment")
 
-# Kenyan city origins in EPSG:21037 (Arc 1960 / UTM Zone 37S)
-# Eastings and northings approximate city centre coordinates.
-KENYA_ORIGINS = {
-    'Nairobi':  (257000.0, 9855000.0),  # CBD, Upper Hill area
-    'Mombasa':  (530500.0, 9618000.0),  # Mombasa Island
-    'Kisumu':   (194500.0, 9974000.0),  # Kisumu CBD
-    'Nakuru':   (198000.0, 9974000.0),  # Nakuru town centre  (zone 36S crossover — approx)
-    'Eldoret':  (175000.0, 9988000.0),  # Eldoret CBD
-    'Thika':    (274000.0, 9880000.0),  # Thika town
-    'Nyeri':    (267000.0, 9924000.0),  # Nyeri town
-    'Malindi':  (567000.0, 9695000.0),  # Malindi town
-}
+# All 47 Kenyan counties in EPSG:21037 (Arc 1960 / UTM Zone 37S)
+# Counties west of 36°E are technically Zone 36S; the Zone 37S values
+# are used here as an offset for procedural building placement only —
+# absolute geographic accuracy is not required for this use-case.
+from kenya_counties import COUNTY_UTM_ORIGINS, TOWN_ALIASES, ALL_COUNTIES
+
+KENYA_ORIGINS = dict(COUNTY_UTM_ORIGINS)
+# Add town aliases so existing scripts (--crs Eldoret, --crs Thika etc.) still work
+for _alias, _county in TOWN_ALIASES.items():
+    if _alias not in KENYA_ORIGINS and _county in KENYA_ORIGINS:
+        KENYA_ORIGINS[_alias] = KENYA_ORIGINS[_county]
+
+# Legacy reference: Nairobi was (257000.0, 9855000.0) — now computed from lat/lon
 
 def arranger(i, n, crs = None):
     """Arranges the location of each building."""
