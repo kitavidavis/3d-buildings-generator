@@ -467,7 +467,15 @@ def main():
         print(f"  Adding {len(parks_el)} green areas ...")
         add_osm_parks(env, parks_el, offset)
 
-    scene_items.append({"name": "environment", "geom": env, "extras": None})
+    scene_items.append({
+        "name": "environment",
+        "geom": env,
+        "extras": {
+            "utmOffsetE": round(offset[0], 2),
+            "utmOffsetN": round(offset[1], 2),
+            "crs": "EPSG:21037",
+        },
+    })
 
     # Individual buildings — each as its own Node for click-to-inspect
     for b in buildings:
